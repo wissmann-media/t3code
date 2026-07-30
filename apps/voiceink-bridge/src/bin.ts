@@ -11,6 +11,7 @@ import {
 import { createBridgeServer, BridgePairingSession } from "./server.ts";
 import { BridgeStore } from "./store.ts";
 import { EffectT3Client } from "./t3Client.ts";
+import type { BridgeEnvironment } from "./types.ts";
 
 const run = async (): Promise<void> => {
   const args = parseArguments(NodeProcess.argv.slice(2));
@@ -49,6 +50,7 @@ const run = async (): Promise<void> => {
       readonly id: string;
       readonly label: string;
       readonly serverVersion: string;
+      readonly providers: BridgeEnvironment["providers"];
     }) => store.markConnected(environment),
     onDisconnected: (reason: string) => store.markDisconnected(reason),
     onShellItem: (item: Parameters<BridgeStore["applyShellItem"]>[0]) => store.applyShellItem(item),

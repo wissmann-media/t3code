@@ -74,6 +74,7 @@ export class BridgeStore {
     readonly id: string;
     readonly label: string;
     readonly serverVersion: string;
+    readonly providers?: BridgeEnvironment["providers"];
   }): void {
     const timestamp = nowIso();
     const next: BridgeEnvironment = {
@@ -85,11 +86,16 @@ export class BridgeStore {
       lastConnectedAt: timestamp,
       lastSnapshotAt: this.state.snapshot.environment?.lastSnapshotAt ?? null,
       errorCode: null,
+      providers: environment.providers ?? [],
     };
     this.replaceSnapshot({ ...this.state.snapshot, environment: next });
     this.appendEvent("environment.connected", `connection:${timestamp}`, {
       freshness: "live",
-      payload: { connection: "live", serverVersion: environment.serverVersion },
+      payload: {
+        connection: "live",
+        serverVersion: environment.serverVersion,
+        providerCount: next.providers.length,
+      },
     });
   }
 

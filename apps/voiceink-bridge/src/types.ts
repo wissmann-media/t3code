@@ -11,6 +11,20 @@ export const STATUS_SCHEMA_VERSION = 1;
 export type BridgeFreshness = "live" | "recent" | "stale" | "offline";
 export type BridgeConnectionState = "connecting" | "live" | "stale" | "offline" | "error";
 
+export interface BridgeProvider {
+  readonly instanceId: string;
+  readonly driver: string;
+  readonly enabled: boolean;
+  readonly installed: boolean;
+  readonly state: "ready" | "warning" | "error" | "disabled";
+  readonly authStatus: "authenticated" | "unauthenticated" | "unknown";
+  readonly models: ReadonlyArray<{
+    readonly slug: string;
+    readonly name: string;
+    readonly isDefault: boolean;
+  }>;
+}
+
 export interface BridgeEnvironment {
   readonly id: string;
   readonly label: string;
@@ -20,6 +34,7 @@ export interface BridgeEnvironment {
   readonly lastConnectedAt: string | null;
   readonly lastSnapshotAt: string | null;
   readonly errorCode: string | null;
+  readonly providers: ReadonlyArray<BridgeProvider>;
 }
 
 export interface BridgeProject {
@@ -129,6 +144,7 @@ export interface T3BridgeCallbacks {
     readonly id: string;
     readonly label: string;
     readonly serverVersion: string;
+    readonly providers: ReadonlyArray<BridgeProvider>;
   }) => void;
   readonly onDisconnected: (reason: string) => void;
   readonly onShellItem: (item: T3ShellItem) => void;

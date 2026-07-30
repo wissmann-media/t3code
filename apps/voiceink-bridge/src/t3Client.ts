@@ -102,11 +102,25 @@ export class EffectT3Client implements T3Client {
         const factory = yield* RpcSessionFactory;
         const session = yield* factory.connect(prepared);
         yield* session.ready;
+        const config = yield* session.initialConfig;
         bridge.activeClient = session.client;
         bridge.callbacks.onConnected({
           id: descriptor.environmentId,
           label: descriptor.label,
           serverVersion: descriptor.serverVersion,
+          providers: config.providers.map((provider) => ({
+            instanceId: provider.instanceId,
+            driver: provider.driver,
+            enabled: provider.enabled,
+            installed: provider.installed,
+            state: provider.status,
+            authStatus: provider.auth.status,
+            models: provider.models.map((model) => ({
+              slug: model.slug,
+              name: model.name,
+              isDefault: model.isDefault === true,
+            })),
+          })),
         });
 
         const watched = new Set<string>();

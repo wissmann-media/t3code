@@ -156,6 +156,7 @@ const routeRequest = async (
       bridgeVersion: BRIDGE_VERSION,
       compatible: true,
       scopes: ["orchestration:read", "orchestration:operate"],
+      providers: options.store.snapshot().environment?.providers ?? [],
       capabilities: [
         "environment.read",
         "project.read",
