@@ -161,6 +161,7 @@ const routeRequest = async (
         "environment.read",
         "project.read",
         "thread.read",
+        "thread.output.read",
         "thread.diff.read",
         "event.subscribe",
         "project.create",
@@ -211,6 +212,30 @@ const routeRequest = async (
   }
 
   const threadMatch = /^\/v1\/threads\/([^/]+)$/.exec(url.pathname);
+  const threadOutputMatch = /^\/v1\/threads\/([^/]+)\/output$/.exec(url.pathname);
+  if (method === "GET" && threadOutputMatch?.[1] !== undefined) {
+    const threadId = decodeURIComponent(threadOutputMatch[1]);
+    const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+    if (thread === undefined) {
+      sendJson(response, 404, { error: "not_found" });
+    } else if (!options.t3.connected()) {
+      sendJson(response, 503, { error: "t3_unavailable" });
+    } else {
+      const output = await options.t3.threadOutput(threadId);
+      if (
+        output.threadId !== thread.id ||
+        output.projectId !== thread.projectId ||
+        output.ownership !== "t3code" ||
+        output.freshness !== "live"
+      ) {
+        sendJson(response, 409, { error: "invalid_thread_output" });
+      } else {
+        sendJson(response, 200, { output });
+      }
+    }
+    return;
+  }
+
   if (method === "GET" && threadMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(threadMatch[1]);
     const thread = snapshot.threads.find((candidate) => candidate.id === threadId);

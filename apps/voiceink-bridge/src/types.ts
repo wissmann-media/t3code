@@ -6,7 +6,7 @@ import type {
 } from "@t3tools/contracts";
 
 export const BRIDGE_API_VERSION = 1;
-export const BRIDGE_VERSION = "0.1.1";
+export const BRIDGE_VERSION = "0.1.2";
 export const STATUS_SCHEMA_VERSION = 1;
 
 export type BridgeFreshness = "live" | "recent" | "stale" | "offline";
@@ -42,6 +42,7 @@ export interface BridgeProject {
   readonly id: string;
   readonly title: string;
   readonly workspaceRoot: string;
+  readonly defaultProvider: string | null;
   readonly updatedAt: string;
   readonly freshness: BridgeFreshness;
 }
@@ -86,6 +87,16 @@ export interface BridgeThreadDetail {
     readonly createdAt: string;
     readonly requestId?: string;
   }>;
+}
+
+export interface BridgeThreadOutput {
+  readonly threadId: string;
+  readonly projectId: string;
+  readonly assistantText: string | null;
+  readonly createdAt: string | null;
+  readonly truncated: boolean;
+  readonly freshness: "live";
+  readonly ownership: "t3code";
 }
 
 export interface BridgeSnapshot {

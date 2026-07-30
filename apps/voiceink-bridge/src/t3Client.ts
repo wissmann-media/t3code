@@ -23,13 +23,15 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import { isAttentionThread } from "./normalization.ts";
-import type { T3BridgeCallbacks, T3ShellItem } from "./types.ts";
+import { normalizeThreadOutput } from "./normalization.ts";
+import type { BridgeThreadOutput, T3BridgeCallbacks, T3ShellItem } from "./types.ts";
 
 const httpLayer = remoteHttpClientLayer((input, init) => globalThis.fetch(input, init));
 const rpcLayer = rpcSessionFactoryLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
@@ -51,6 +53,7 @@ export interface T3Client {
     readonly fromTurnCount: number;
     readonly toTurnCount: number;
   }>;
+  readonly threadOutput: (threadId: string) => Promise<BridgeThreadOutput>;
   readonly connected: () => boolean;
 }
 
@@ -239,6 +242,24 @@ export class EffectT3Client implements T3Client {
         toTurnCount,
       }),
     );
+  }
+
+  async threadOutput(threadId: string): Promise<BridgeThreadOutput> {
+    const active = this.activeClient;
+    if (active === null) throw new Error("t3_unavailable");
+    const item = await runtime.runPromise(
+      active[ORCHESTRATION_WS_METHODS.subscribeThread]({
+        threadId: ThreadId.make(threadId),
+        requestCompletionMarker: false,
+      }).pipe(
+        Stream.filter((candidate) => candidate.kind === "snapshot"),
+        Stream.runHead,
+        Effect.timeout("6 seconds"),
+        Effect.map(Option.getOrThrow),
+      ),
+    );
+    if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
+    return normalizeThreadOutput(item.snapshot.thread);
   }
 
   connected(): boolean {

@@ -1,12 +1,12 @@
 import type { OrchestrationThread, OrchestrationThreadShell } from "@t3tools/contracts";
-import { EventId, ThreadId } from "@t3tools/contracts";
+import { EventId, MessageId, ThreadId } from "@t3tools/contracts";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
-import { normalizeThread } from "./normalization.ts";
+import { normalizeThread, normalizeThreadOutput } from "./normalization.ts";
 import { BridgePairingSession } from "./server.ts";
 import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
@@ -68,6 +68,71 @@ describe("thread normalization", () => {
     expect(thread.status).toBe("idle");
     expect(thread.outcome).toBe("unknown");
     expect(thread.freshness).toBe("offline");
+  });
+});
+
+describe("bounded thread output", () => {
+  it("returns only the latest assistant message and redacts secrets", () => {
+    const thread = {
+      ...threadShell(),
+      deletedAt: null,
+      messages: [
+        {
+          id: MessageId.make("message-user"),
+          role: "user",
+          text: "Keep this prompt private",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-07-30T12:00:00Z",
+          updatedAt: "2026-07-30T12:00:00Z",
+        },
+        {
+          id: MessageId.make("message-assistant"),
+          role: "assistant",
+          text: "Finished safely. api_key=secret-value-that-must-not-leak",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-07-30T12:01:00Z",
+          updatedAt: "2026-07-30T12:01:00Z",
+        },
+      ],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    } as OrchestrationThread;
+
+    const output = normalizeThreadOutput(thread);
+
+    expect(output.assistantText).toBe("Finished safely. [REDACTED]");
+    expect(output.assistantText).not.toContain("prompt");
+    expect(output.ownership).toBe("t3code");
+    expect(output.freshness).toBe("live");
+  });
+
+  it("bounds assistant output to four thousand characters", () => {
+    const thread = {
+      ...threadShell(),
+      deletedAt: null,
+      messages: [
+        {
+          id: MessageId.make("message-assistant"),
+          role: "assistant",
+          text: "x".repeat(5_000),
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-07-30T12:01:00Z",
+          updatedAt: "2026-07-30T12:01:00Z",
+        },
+      ],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    } as OrchestrationThread;
+
+    const output = normalizeThreadOutput(thread);
+
+    expect(output.truncated).toBe(true);
+    expect(output.assistantText?.length).toBe(4_001);
   });
 });
 
@@ -292,5 +357,14 @@ const fakeT3 = (dispatched: unknown[]): T3Client => ({
     return { sequence: dispatched.length };
   },
   fullThreadDiff: async () => ({ diff: "", fromTurnCount: 0, toTurnCount: 0 }),
+  threadOutput: async () => ({
+    threadId: "thread-1",
+    projectId: "project-1",
+    assistantText: null,
+    createdAt: null,
+    truncated: false,
+    freshness: "live",
+    ownership: "t3code",
+  }),
   connected: () => true,
 });
