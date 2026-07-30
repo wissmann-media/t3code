@@ -68,7 +68,19 @@ const run = async (): Promise<void> => {
   });
 
   await server.listen(args.port);
-  t3.start(store.snapshot().sourceCursor);
+  const initialSnapshot = store.snapshot();
+  t3.start(
+    initialSnapshot.sourceCursor,
+    initialSnapshot.threads
+      .filter(
+        (thread) =>
+          thread.status === "starting" ||
+          thread.status === "running" ||
+          thread.status === "waiting_for_approval" ||
+          thread.status === "waiting_for_input",
+      )
+      .map((thread) => thread.id),
+  );
   process.stderr.write(`VoiceInk pairing code: ${pairing.code} (valid for five minutes)\n`);
   process.stdout.write(`VoiceInk T3 Bridge listening on http://127.0.0.1:${args.port}\n`);
 

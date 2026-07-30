@@ -1,4 +1,5 @@
 import type { OrchestrationThread, OrchestrationThreadShell } from "@t3tools/contracts";
+import { EventId, ThreadId } from "@t3tools/contracts";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -147,6 +148,63 @@ describe("BridgeStore", () => {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("projects incremental approval activities without transcript content", () => {
+    const store = liveStore();
+    store.applyThreadItem("thread-1", {
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 10,
+        thread: {
+          id: "thread-1",
+          projectId: "project-1",
+          messages: [],
+          activities: [],
+          checkpoints: [],
+        } as unknown as OrchestrationThread,
+      },
+    });
+    store.applyThreadItem("thread-1", {
+      kind: "event",
+      event: {
+        sequence: 11,
+        eventId: EventId.make("event-approval"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-07-30T12:00:01Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.activity-appended",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("activity-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "private approval detail",
+            payload: { requestId: "approval-1", command: "private command" },
+            turnId: null,
+            createdAt: "2026-07-30T12:00:01Z",
+          },
+        },
+      },
+    });
+
+    expect(store.snapshot().details["thread-1"]?.recentActivity).toEqual([
+      {
+        id: "activity-approval",
+        tone: "approval",
+        kind: "approval.requested",
+        summary: "T3 Code is waiting for a decision.",
+        createdAt: "2026-07-30T12:00:01Z",
+        requestId: "approval-1",
+      },
+    ]);
+    expect(JSON.stringify(store.snapshot())).not.toContain("private command");
+    expect(JSON.stringify(store.snapshot())).not.toContain("private approval detail");
+  });
 });
 
 describe("BridgeCommandService", () => {
@@ -176,6 +234,28 @@ describe("BridgeCommandService", () => {
     await expect(service.interrupt("unmanaged", { commandId: "command-2" })).rejects.toBeInstanceOf(
       BridgeCommandError,
     );
+  });
+
+  it("normalizes omitted optional thread paths to null for T3", async () => {
+    const store = liveStore();
+    const dispatched: unknown[] = [];
+    const service = new BridgeCommandService(store, fakeT3(dispatched));
+
+    await service.createThread({
+      commandId: "command-thread",
+      threadId: "thread-new",
+      projectId: "project-new",
+      title: "New thread",
+      modelSelection: { instanceId: "codex", model: "gpt-test" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+    });
+
+    expect(dispatched[0]).toMatchObject({
+      type: "thread.create",
+      branch: null,
+      worktreePath: null,
+    });
   });
 });
 

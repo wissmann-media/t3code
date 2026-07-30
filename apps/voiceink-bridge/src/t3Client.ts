@@ -39,7 +39,7 @@ const decodeCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand, {
 });
 
 export interface T3Client {
-  readonly start: (afterSequence: number) => void;
+  readonly start: (afterSequence: number, attentionThreadIds?: ReadonlyArray<string>) => void;
   readonly stop: () => Promise<void>;
   readonly pair: (bootstrapCredential: string) => Promise<string>;
   readonly dispatch: (command: unknown) => Promise<{ readonly sequence: number }>;
@@ -67,7 +67,7 @@ export class EffectT3Client implements T3Client {
     this.callbacks = callbacks;
   }
 
-  start(afterSequence: number): void {
+  start(afterSequence: number, attentionThreadIds: ReadonlyArray<string> = []): void {
     if (this.fiber !== null) return;
     const bridge = this;
     let resumeSequence = afterSequence;
@@ -124,22 +124,32 @@ export class EffectT3Client implements T3Client {
         });
 
         const watched = new Set<string>();
-        const watchThread = Effect.fn("VoiceInkBridge.watchThread")(function* (
-          thread: OrchestrationThreadShell,
+        const watchThreadId = Effect.fn("VoiceInkBridge.watchThreadId")(function* (
+          threadId: string,
         ) {
-          if (!isAttentionThread(thread) || watched.has(thread.id)) return;
-          watched.add(thread.id);
+          if (watched.has(threadId)) return;
+          watched.add(threadId);
           yield* session.client[ORCHESTRATION_WS_METHODS.subscribeThread]({
-            threadId: thread.id,
+            threadId: ThreadId.make(threadId),
             requestCompletionMarker: true,
           }).pipe(
             Stream.runForEach((item) =>
-              Effect.sync(() => bridge.callbacks.onThreadItem(thread.id, item)),
+              Effect.sync(() => bridge.callbacks.onThreadItem(threadId, item)),
             ),
-            Effect.ensuring(Effect.sync(() => watched.delete(thread.id))),
+            Effect.ensuring(Effect.sync(() => watched.delete(threadId))),
             Effect.forkScoped,
           );
         });
+        const watchThread = Effect.fn("VoiceInkBridge.watchThread")(function* (
+          thread: OrchestrationThreadShell,
+        ) {
+          if (!isAttentionThread(thread)) return;
+          yield* watchThreadId(thread.id);
+        });
+
+        for (const threadId of attentionThreadIds) {
+          yield* watchThreadId(threadId);
+        }
 
         const handleShell = Effect.fn("VoiceInkBridge.handleShell")(function* (item: T3ShellItem) {
           bridge.callbacks.onShellItem(item);

@@ -227,26 +227,26 @@ export class BridgeStore {
   }
 
   applyThreadItem(threadId: string, item: T3ThreadItem): void {
-    if (item.kind !== "snapshot") return;
+    if (item.kind === "synchronized") return;
+    const detail =
+      item.kind === "snapshot"
+        ? normalizeThreadDetail(item.snapshot.snapshotSequence, item.snapshot.thread)
+        : applyThreadDetailEvent(threadId, this.state.snapshot.details[threadId], item.event);
+    if (detail === null) return;
     const details: Record<string, BridgeThreadDetail> = {
       ...this.state.snapshot.details,
-      [threadId]: normalizeThreadDetail(item.snapshot.snapshotSequence, item.snapshot.thread),
+      [threadId]: detail,
     };
     this.replaceSnapshot({ ...this.state.snapshot, details });
-    this.appendEvent(
-      "thread.detail.updated",
-      `thread:${threadId}:${item.snapshot.snapshotSequence}`,
-      {
-        projectId: item.snapshot.thread.projectId,
-        threadId,
-        freshness: "live",
-        payload: {
-          sourceSequence: item.snapshot.snapshotSequence,
-          activityCount: item.snapshot.thread.activities.length,
-          checkpointCount: item.snapshot.thread.checkpoints.length,
-        },
+    this.appendEvent("thread.detail.updated", `thread:${threadId}:${detail.snapshotSequence}`, {
+      threadId,
+      freshness: "live",
+      payload: {
+        sourceSequence: detail.snapshotSequence,
+        activityCount: detail.recentActivity.length,
+        checkpointCount: detail.checkpointCount,
       },
-    );
+    });
   }
 
   adoptThread(threadId: string): boolean {
@@ -415,6 +415,39 @@ const normalizeThreadDetail = (
         ...(requestId === null ? {} : { requestId }),
       };
     }),
+  };
+};
+
+const applyThreadDetailEvent = (
+  threadId: string,
+  current: BridgeThreadDetail | undefined,
+  event: Extract<T3ThreadItem, { readonly kind: "event" }>["event"],
+): BridgeThreadDetail | null => {
+  if (event.type !== "thread.activity-appended" || event.payload.threadId !== threadId) {
+    return null;
+  }
+  if (current !== undefined && event.sequence <= current.snapshotSequence) {
+    return null;
+  }
+  const activity = event.payload.activity;
+  const requestId = requestIdFromPayload(activity.payload);
+  const normalized = {
+    id: activity.id,
+    tone: activity.tone,
+    kind: activity.kind,
+    summary: minimizedActivitySummary(activity.tone),
+    createdAt: activity.createdAt,
+    ...(requestId === null ? {} : { requestId }),
+  };
+  return {
+    threadId,
+    snapshotSequence: event.sequence,
+    checkpointCount: current?.checkpointCount ?? 0,
+    latestAssistantText: null,
+    recentActivity: [
+      ...(current?.recentActivity.filter((candidate) => candidate.id !== activity.id) ?? []),
+      normalized,
+    ].slice(-20),
   };
 };
 

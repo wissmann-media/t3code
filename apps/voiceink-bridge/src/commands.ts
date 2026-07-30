@@ -64,8 +64,8 @@ export class BridgeCommandService {
       modelSelection: request.modelSelection,
       runtimeMode: request.runtimeMode,
       interactionMode: request.interactionMode,
-      branch: request.branch,
-      worktreePath: request.worktreePath,
+      branch: request.branch ?? null,
+      worktreePath: request.worktreePath ?? null,
       createdAt: nowIso(),
     });
     this.store.manageThread(request.threadId);

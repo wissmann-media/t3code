@@ -30,8 +30,10 @@ export const CreateThreadRequest = Schema.Struct({
   modelSelection: ModelSelection,
   runtimeMode: Schema.Literals(["approval-required", "auto-accept-edits", "auto", "full-access"]),
   interactionMode: Schema.Literals(["default", "plan"]),
-  branch: Schema.NullOr(Identifier),
-  worktreePath: Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  branch: Schema.optional(Schema.NullOr(Identifier)),
+  worktreePath: Schema.optional(
+    Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  ),
 });
 
 export const StartTurnRequest = Schema.Struct({
