@@ -36,8 +36,13 @@ export class MacOSKeychainCredentialStore implements CredentialStore {
         "-l",
         "VoiceInk T3 Bridge",
         "-w",
+        value,
       ],
-      { input: `${value}\n`, encoding: "utf8", maxBuffer: 64 * 1024 },
+      {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     if (result.status !== 0) {
       throw new Error("Could not store the T3 Bridge credential in the login keychain.");

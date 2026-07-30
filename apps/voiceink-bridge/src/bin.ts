@@ -1,6 +1,5 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeProcess from "node:process";
 
 import { BridgeCommandService } from "./commands.ts";
 import {
@@ -14,7 +13,7 @@ import { EffectT3Client } from "./t3Client.ts";
 import type { BridgeEnvironment } from "./types.ts";
 
 const run = async (): Promise<void> => {
-  const args = parseArguments(NodeProcess.argv.slice(2));
+  const args = parseArguments(process.argv.slice(2));
   const t3Url = normalizeLoopbackUrl(args.t3Url);
   const credentialStore = new MacOSKeychainCredentialStore();
   const bearerAccount = t3BearerAccount(t3Url);
@@ -24,7 +23,7 @@ const run = async (): Promise<void> => {
     const t3 = new EffectT3Client(t3Url, "", noOpCallbacks);
     const accessToken = await t3.pair(bootstrapCredential);
     await credentialStore.write(bearerAccount, accessToken);
-    NodeProcess.stdout.write("T3 pairing succeeded. The access token is stored in Keychain.\n");
+    process.stdout.write("T3 pairing succeeded. The access token is stored in Keychain.\n");
     return;
   }
 
@@ -70,13 +69,13 @@ const run = async (): Promise<void> => {
 
   await server.listen(args.port);
   t3.start(store.snapshot().sourceCursor);
-  NodeProcess.stderr.write(`VoiceInk pairing code: ${pairing.code} (valid for five minutes)\n`);
-  NodeProcess.stdout.write(`VoiceInk T3 Bridge listening on http://127.0.0.1:${args.port}\n`);
+  process.stderr.write(`VoiceInk pairing code: ${pairing.code} (valid for five minutes)\n`);
+  process.stdout.write(`VoiceInk T3 Bridge listening on http://127.0.0.1:${args.port}\n`);
 
   await new Promise<void>((resolve) => {
     const shutdown = () => resolve();
-    NodeProcess.once("SIGINT", shutdown);
-    NodeProcess.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   });
   await t3.stop();
   await server.close();
@@ -133,12 +132,12 @@ const normalizeLoopbackUrl = (value: string): string => {
 };
 
 const readSecretFromStandardInput = async (): Promise<string> => {
-  if (NodeProcess.stdin.isTTY) {
-    NodeProcess.stderr.write("Paste the one-time T3 pairing credential, then press Return:\n");
+  if (process.stdin.isTTY) {
+    process.stderr.write("Paste the one-time T3 pairing credential, then press Return:\n");
   }
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of NodeProcess.stdin) {
+  for await (const chunk of process.stdin) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += bytes.length;
     if (total > 16 * 1024) throw new Error("Pairing credential is too large.");
@@ -151,6 +150,6 @@ const readSecretFromStandardInput = async (): Promise<string> => {
 
 void run().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : "VoiceInk T3 Bridge failed.";
-  NodeProcess.stderr.write(`${message}\n`);
-  NodeProcess.exit(1);
+  process.stderr.write(`${message}\n`);
+  process.exit(1);
 });
