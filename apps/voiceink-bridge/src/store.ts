@@ -47,6 +47,7 @@ export class BridgeStore {
   constructor(filePath: string | null = null) {
     this.filePath = filePath;
     this.state = this.load();
+    if (this.filePath !== null) this.persist();
   }
 
   snapshot(): BridgeSnapshot {
@@ -364,7 +365,7 @@ export class BridgeStore {
         "schemaVersion" in parsed &&
         parsed.schemaVersion === 1
       ) {
-        return parsed as PersistedBridgeState;
+        return minimizePersistedState(parsed as PersistedBridgeState);
       }
     } catch {
       return emptyState();
@@ -396,29 +397,61 @@ const normalizeThreadDetail = (
   snapshotSequence: number,
   thread: OrchestrationThread,
 ): BridgeThreadDetail => {
-  const latestAssistant =
-    [...thread.messages].reverse().find((message) => message.role === "assistant")?.text ?? null;
   return {
     threadId: thread.id,
     snapshotSequence,
     checkpointCount: thread.checkpoints.length,
-    latestAssistantText:
-      latestAssistant === null
-        ? null
-        : latestAssistant.slice(Math.max(0, latestAssistant.length - 4_000)),
+    // The Bridge observes lifecycle, not conversation history. Even attention
+    // subscriptions must never import an existing assistant transcript.
+    latestAssistantText: null,
     recentActivity: thread.activities.slice(-20).map((activity) => {
       const requestId = requestIdFromPayload(activity.payload);
       return {
         id: activity.id,
         tone: activity.tone,
         kind: activity.kind,
-        summary: activity.summary.slice(0, 1_000),
+        summary: minimizedActivitySummary(activity.tone),
         createdAt: activity.createdAt,
         ...(requestId === null ? {} : { requestId }),
       };
     }),
   };
 };
+
+const minimizedActivitySummary = (
+  tone: BridgeThreadDetail["recentActivity"][number]["tone"],
+): string => {
+  switch (tone) {
+    case "approval":
+      return "T3 Code is waiting for a decision.";
+    case "error":
+      return "T3 Code reported an error.";
+    case "tool":
+      return "T3 Code completed a tool step.";
+    case "info":
+      return "T3 Code updated thread activity.";
+  }
+};
+
+const minimizePersistedState = (state: PersistedBridgeState): PersistedBridgeState => ({
+  ...state,
+  snapshot: {
+    ...state.snapshot,
+    details: Object.fromEntries(
+      Object.entries(state.snapshot.details).map(([threadId, detail]) => [
+        threadId,
+        {
+          ...detail,
+          latestAssistantText: null,
+          recentActivity: detail.recentActivity.slice(-20).map((activity) => ({
+            ...activity,
+            summary: minimizedActivitySummary(activity.tone),
+          })),
+        },
+      ]),
+    ),
+  },
+});
 
 const requestIdFromPayload = (payload: unknown): string | null => {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) return null;

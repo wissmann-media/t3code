@@ -1,4 +1,7 @@
-import type { OrchestrationThreadShell } from "@t3tools/contracts";
+import type { OrchestrationThread, OrchestrationThreadShell } from "@t3tools/contracts";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
@@ -103,6 +106,46 @@ describe("BridgeStore", () => {
     expect(store.snapshot().environment?.connection).toBe("offline");
     expect(store.snapshot().threads[0]?.freshness).toBe("offline");
     expect(store.snapshot().threads[0]?.outcome).toBe("unknown");
+  });
+
+  it("never imports transcript text and scrubs persisted detail on restart", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "voiceink-bridge-"));
+    const file = NodePath.join(directory, "state.json");
+    try {
+      const store = new BridgeStore(file);
+      store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.31" });
+      store.applyThreadItem("thread-1", {
+        kind: "snapshot",
+        snapshot: {
+          snapshotSequence: 1,
+          thread: {
+            id: "thread-1",
+            projectId: "project-1",
+            messages: [{ role: "assistant", text: "private transcript sentinel" }],
+            activities: [
+              {
+                id: "activity-1",
+                tone: "approval",
+                kind: "permission",
+                summary: "private command sentinel",
+                createdAt: "2026-07-30T12:00:00Z",
+                payload: { requestId: "approval-1" },
+              },
+            ],
+            checkpoints: [],
+          } as unknown as OrchestrationThread,
+        },
+      });
+
+      const reopened = new BridgeStore(file);
+      const detail = reopened.snapshot().details["thread-1"];
+      expect(detail?.latestAssistantText).toBeNull();
+      expect(detail?.recentActivity[0]?.summary).toBe("T3 Code is waiting for a decision.");
+      expect(JSON.stringify(reopened.snapshot())).not.toContain("private transcript sentinel");
+      expect(JSON.stringify(reopened.snapshot())).not.toContain("private command sentinel");
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
