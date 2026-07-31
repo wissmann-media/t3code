@@ -8,7 +8,7 @@ import {
   t3BearerAccount,
 } from "./credentials.ts";
 import { createBridgeServer, BridgePairingSession } from "./server.ts";
-import { BridgeStore } from "./store.ts";
+import { BridgeStore, resumableShellCursor } from "./store.ts";
 import { EffectT3Client } from "./t3Client.ts";
 import type { BridgeEnvironment } from "./types.ts";
 
@@ -70,7 +70,7 @@ const run = async (): Promise<void> => {
   await server.listen(args.port);
   const initialSnapshot = store.snapshot();
   t3.start(
-    initialSnapshot.sourceCursor,
+    resumableShellCursor(initialSnapshot),
     initialSnapshot.threads
       .filter(
         (thread) =>

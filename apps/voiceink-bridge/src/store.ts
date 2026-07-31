@@ -39,6 +39,17 @@ const emptyState = (): PersistedBridgeState => ({
   commandReceipts: [],
 });
 
+export const resumableShellCursor = (snapshot: BridgeSnapshot): number => {
+  const environment = snapshot.environment;
+  const fullyLive =
+    environment !== null &&
+    environment.connection === "live" &&
+    environment.freshness === "live" &&
+    snapshot.projects.every((project) => project.freshness === "live") &&
+    snapshot.threads.every((thread) => thread.freshness === "live");
+  return fullyLive && snapshot.sourceCursor > 0 ? snapshot.sourceCursor : 0;
+};
+
 export class BridgeStore {
   private state: PersistedBridgeState;
   private readonly eventListeners = new Set<(event: BridgeStatusEvent) => void>();

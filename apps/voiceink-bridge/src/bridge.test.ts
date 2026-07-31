@@ -8,7 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
 import { normalizeThread, normalizeThreadOutput } from "./normalization.ts";
 import { BridgePairingSession } from "./server.ts";
-import { BridgeStore } from "./store.ts";
+import { BridgeStore, resumableShellCursor } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
 
 const threadShell = (
@@ -172,6 +172,57 @@ describe("BridgeStore", () => {
     expect(store.snapshot().environment?.connection).toBe("offline");
     expect(store.snapshot().threads[0]?.freshness).toBe("offline");
     expect(store.snapshot().threads[0]?.outcome).toBe("unknown");
+  });
+
+  it("forces a full shell snapshot after reconnecting persisted offline data", () => {
+    const store = new BridgeStore();
+    store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.31" });
+    store.applyShellItem({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 10,
+        projects: [],
+        threads: [threadShell()],
+        updatedAt: "2026-07-30T12:00:00Z",
+      },
+    });
+
+    expect(resumableShellCursor(store.snapshot())).toBe(10);
+    expect(
+      resumableShellCursor({
+        ...store.snapshot(),
+        projects: [
+          {
+            id: "project-1",
+            title: "Project",
+            workspaceRoot: "/tmp/project",
+            defaultProvider: "codex",
+            updatedAt: "2026-07-30T12:00:00Z",
+            freshness: "offline",
+          },
+        ],
+      }),
+    ).toBe(0);
+
+    store.markDisconnected("transport");
+    store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.31" });
+
+    expect(store.snapshot().environment?.freshness).toBe("live");
+    expect(store.snapshot().threads[0]?.freshness).toBe("offline");
+    expect(resumableShellCursor(store.snapshot())).toBe(0);
+
+    store.applyShellItem({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 10,
+        projects: [],
+        threads: [threadShell()],
+        updatedAt: "2026-07-30T12:00:01Z",
+      },
+    });
+
+    expect(store.snapshot().threads[0]?.freshness).toBe("live");
+    expect(resumableShellCursor(store.snapshot())).toBe(10);
   });
 
   it("never imports transcript text and scrubs persisted detail on restart", () => {
