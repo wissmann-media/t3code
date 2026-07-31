@@ -45,6 +45,19 @@ export const StartTurnRequest = Schema.Struct({
   interactionMode: Schema.Literals(["default", "plan"]),
 });
 
+export const ForkThreadRequest = Schema.Struct({
+  ...CommandBase,
+  threadId: Identifier,
+  messageId: Identifier,
+  title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(300)),
+  text: NonEmptyText,
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: Schema.optional(
+    Schema.Literals(["approval-required", "auto-accept-edits", "auto", "full-access"]),
+  ),
+  interactionMode: Schema.optional(Schema.Literals(["default", "plan"])),
+});
+
 export const ThreadCommandRequest = Schema.Struct(CommandBase);
 
 export const ApprovalResponseRequest = Schema.Struct({
@@ -66,6 +79,7 @@ export const PairingRequest = Schema.Struct({
 export type CreateProjectRequest = typeof CreateProjectRequest.Type;
 export type CreateThreadRequest = typeof CreateThreadRequest.Type;
 export type StartTurnRequest = typeof StartTurnRequest.Type;
+export type ForkThreadRequest = typeof ForkThreadRequest.Type;
 export type ThreadCommandRequest = typeof ThreadCommandRequest.Type;
 export type ApprovalResponseRequest = typeof ApprovalResponseRequest.Type;
 export type UserInputResponseRequest = typeof UserInputResponseRequest.Type;
@@ -77,6 +91,9 @@ export const decodeCreateThread = Schema.decodeUnknownPromise(CreateThreadReques
   onExcessProperty: "error",
 });
 export const decodeStartTurn = Schema.decodeUnknownPromise(StartTurnRequest, {
+  onExcessProperty: "error",
+});
+export const decodeForkThread = Schema.decodeUnknownPromise(ForkThreadRequest, {
   onExcessProperty: "error",
 });
 export const decodeThreadCommand = Schema.decodeUnknownPromise(ThreadCommandRequest, {

@@ -54,6 +54,7 @@ export interface T3Client {
     readonly toTurnCount: number;
   }>;
   readonly threadOutput: (threadId: string) => Promise<BridgeThreadOutput>;
+  readonly refreshThread: (threadId: string) => Promise<void>;
   readonly connected: () => boolean;
 }
 
@@ -245,9 +246,22 @@ export class EffectT3Client implements T3Client {
   }
 
   async threadOutput(threadId: string): Promise<BridgeThreadOutput> {
+    const item = await this.fetchThreadSnapshot(threadId);
+    if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
+    this.callbacks.onThreadItem(threadId, item);
+    return normalizeThreadOutput(item.snapshot.thread);
+  }
+
+  async refreshThread(threadId: string): Promise<void> {
+    const item = await this.fetchThreadSnapshot(threadId);
+    if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
+    this.callbacks.onThreadItem(threadId, item);
+  }
+
+  private async fetchThreadSnapshot(threadId: string) {
     const active = this.activeClient;
     if (active === null) throw new Error("t3_unavailable");
-    const item = await runtime.runPromise(
+    return runtime.runPromise(
       active[ORCHESTRATION_WS_METHODS.subscribeThread]({
         threadId: ThreadId.make(threadId),
         requestCompletionMarker: false,
@@ -258,8 +272,6 @@ export class EffectT3Client implements T3Client {
         Effect.map(Option.getOrThrow),
       ),
     );
-    if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
-    return normalizeThreadOutput(item.snapshot.thread);
   }
 
   connected(): boolean {

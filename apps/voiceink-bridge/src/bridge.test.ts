@@ -417,5 +417,6 @@ const fakeT3 = (dispatched: unknown[]): T3Client => ({
     freshness: "live",
     ownership: "t3code",
   }),
+  refreshThread: async () => {},
   connected: () => true,
 });

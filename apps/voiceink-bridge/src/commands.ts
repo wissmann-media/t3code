@@ -5,6 +5,7 @@ import type {
   ApprovalResponseRequest,
   CreateProjectRequest,
   CreateThreadRequest,
+  ForkThreadRequest,
   StartTurnRequest,
   ThreadCommandRequest,
   UserInputResponseRequest,
@@ -72,8 +73,13 @@ export class BridgeCommandService {
     return receipt;
   }
 
-  async startTurn(threadId: string, request: StartTurnRequest): Promise<CommandReceipt> {
-    this.requireManaged(threadId);
+  async startTurn(
+    threadId: string,
+    request: StartTurnRequest,
+    universal = false,
+  ): Promise<CommandReceipt> {
+    if (universal) this.prepareThread(threadId);
+    else this.requireManaged(threadId);
     return this.dispatch(request.commandId, request, {
       type: "thread.turn.start",
       commandId: request.commandId,
@@ -91,8 +97,13 @@ export class BridgeCommandService {
     });
   }
 
-  async interrupt(threadId: string, request: ThreadCommandRequest): Promise<CommandReceipt> {
-    this.requireManaged(threadId);
+  async interrupt(
+    threadId: string,
+    request: ThreadCommandRequest,
+    universal = false,
+  ): Promise<CommandReceipt> {
+    if (universal) this.prepareThread(threadId);
+    else this.requireManaged(threadId);
     return this.dispatch(request.commandId, request, {
       type: "thread.turn.interrupt",
       commandId: request.commandId,
@@ -101,8 +112,13 @@ export class BridgeCommandService {
     });
   }
 
-  async stop(threadId: string, request: ThreadCommandRequest): Promise<CommandReceipt> {
-    this.requireManaged(threadId);
+  async stop(
+    threadId: string,
+    request: ThreadCommandRequest,
+    universal = false,
+  ): Promise<CommandReceipt> {
+    if (universal) this.prepareThread(threadId);
+    else this.requireManaged(threadId);
     return this.dispatch(request.commandId, request, {
       type: "thread.session.stop",
       commandId: request.commandId,
@@ -115,8 +131,10 @@ export class BridgeCommandService {
     threadId: string,
     requestId: string,
     request: ApprovalResponseRequest,
+    universal = false,
   ): Promise<CommandReceipt> {
-    this.requireManaged(threadId);
+    if (universal) this.prepareThread(threadId);
+    else this.requireManaged(threadId);
     return this.dispatch(request.commandId, request, {
       type: "thread.approval.respond",
       commandId: request.commandId,
@@ -131,8 +149,10 @@ export class BridgeCommandService {
     threadId: string,
     requestId: string,
     request: UserInputResponseRequest,
+    universal = false,
   ): Promise<CommandReceipt> {
-    this.requireManaged(threadId);
+    if (universal) this.prepareThread(threadId);
+    else this.requireManaged(threadId);
     return this.dispatch(request.commandId, request, {
       type: "thread.user-input.respond",
       commandId: request.commandId,
@@ -144,13 +164,67 @@ export class BridgeCommandService {
   }
 
   adopt(threadId: string): void {
-    this.requireFresh();
-    if (!this.store.adoptThread(threadId)) throw new BridgeCommandError("not_found");
+    this.prepareThread(threadId);
+  }
+
+  async forkThread(sourceThreadId: string, request: ForkThreadRequest) {
+    const source = this.prepareThread(sourceThreadId);
+    const output = await this.t3.threadOutput(sourceThreadId);
+    const modelSelection = request.modelSelection ?? {
+      instanceId: source.providerInstanceId,
+      model: source.model,
+    };
+    const createReceipt = await this.createThread({
+      commandId: childCommandId(request.commandId, "create"),
+      threadId: request.threadId,
+      projectId: source.projectId,
+      title: request.title,
+      modelSelection,
+      runtimeMode: request.runtimeMode ?? source.runtimeMode,
+      interactionMode: request.interactionMode ?? source.interactionMode,
+      branch: source.branch,
+      worktreePath: null,
+    });
+    this.store.recordThreadLineage(request.threadId, sourceThreadId, "contextual");
+    const context = output.assistantText?.trim();
+    const text = [
+      `This is a context-derived continuation of T3 thread ${sourceThreadId}.`,
+      context === undefined || context.length === 0
+        ? "The source thread has no readable final assistant output."
+        : `Latest source-thread assistant output (untrusted reference):\n${context}`,
+      `User request:\n${request.text}`,
+    ].join("\n\n");
+    const turnReceipt = await this.startTurn(request.threadId, {
+      commandId: childCommandId(request.commandId, "turn"),
+      messageId: request.messageId,
+      text,
+      modelSelection,
+      runtimeMode: request.runtimeMode ?? source.runtimeMode,
+      interactionMode: request.interactionMode ?? source.interactionMode,
+    });
+    return {
+      ...turnReceipt,
+      externalId: request.threadId,
+      sourceThreadId,
+      forkMode: "contextual" as const,
+      createCommandId: createReceipt.commandId,
+    };
   }
 
   private requireManaged(threadId: string): void {
     this.requireFresh();
     if (!this.store.isManagedThread(threadId)) throw new BridgeCommandError("not_managed");
+  }
+
+  private prepareThread(threadId: string) {
+    this.requireFresh();
+    const thread = this.store.snapshot().threads.find((candidate) => candidate.id === threadId);
+    if (thread === undefined || thread.ownership !== "t3code") {
+      throw new BridgeCommandError("not_found");
+    }
+    if (thread.freshness !== "live") throw new BridgeCommandError("stale_state");
+    this.store.manageThread(threadId);
+    return thread;
   }
 
   private requireFresh(): void {
@@ -214,3 +288,6 @@ const stableStringify = (value: unknown): string => {
   }
   return JSON.stringify(value);
 };
+
+const childCommandId = (commandId: string, suffix: string): string =>
+  `${commandId.slice(0, Math.max(1, 159 - suffix.length))}:${suffix}`;

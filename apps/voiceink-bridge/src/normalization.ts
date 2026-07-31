@@ -126,6 +126,10 @@ export const normalizeThread = (
     projectId: thread.projectId,
     title: thread.title,
     provider: providerName(thread.modelSelection.instanceId),
+    providerInstanceId: thread.modelSelection.instanceId,
+    model: thread.modelSelection.model,
+    runtimeMode: thread.runtimeMode,
+    interactionMode: thread.interactionMode,
     status,
     attention:
       status === "waiting_for_approval"
@@ -149,6 +153,17 @@ export const normalizeThread = (
     managed,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    capabilities: [
+      "read",
+      "output",
+      "diff",
+      "turn",
+      "interrupt",
+      "stop",
+      "approval",
+      "input",
+      "fork-contextual",
+    ],
   };
 };
 

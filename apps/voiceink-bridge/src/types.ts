@@ -5,8 +5,9 @@ import type {
   OrchestrationThreadShell,
 } from "@t3tools/contracts";
 
-export const BRIDGE_API_VERSION = 1;
-export const BRIDGE_VERSION = "0.1.2";
+export const LEGACY_BRIDGE_API_VERSION = 1;
+export const BRIDGE_API_VERSION = 2;
+export const BRIDGE_VERSION = "0.2.0";
 export const STATUS_SCHEMA_VERSION = 1;
 
 export type BridgeFreshness = "live" | "recent" | "stale" | "offline";
@@ -63,6 +64,10 @@ export interface BridgeThread {
   readonly projectId: string;
   readonly title: string;
   readonly provider: string;
+  readonly providerInstanceId: string;
+  readonly model: string;
+  readonly runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  readonly interactionMode: "default" | "plan";
   readonly status: BridgeThreadStatus;
   readonly attention: "none" | "approval" | "input" | "failure";
   readonly outcome: "unknown" | "success" | "failure" | "cancelled";
@@ -72,6 +77,19 @@ export interface BridgeThread {
   readonly managed: boolean;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  readonly forkedFromThreadId?: string;
+  readonly forkMode?: "native" | "contextual";
+  readonly capabilities: ReadonlyArray<
+    | "read"
+    | "output"
+    | "diff"
+    | "turn"
+    | "interrupt"
+    | "stop"
+    | "approval"
+    | "input"
+    | "fork-contextual"
+  >;
 }
 
 export interface BridgeThreadDetail {
@@ -106,6 +124,15 @@ export interface BridgeSnapshot {
   readonly threads: ReadonlyArray<BridgeThread>;
   readonly details: Readonly<Record<string, BridgeThreadDetail>>;
   readonly managedThreadIds: ReadonlyArray<string>;
+  readonly threadLineage: Readonly<
+    Record<
+      string,
+      {
+        readonly forkedFromThreadId: string;
+        readonly forkMode: "native" | "contextual";
+      }
+    >
+  >;
 }
 
 export interface BridgeStatusEvent {

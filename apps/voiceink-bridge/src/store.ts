@@ -29,6 +29,7 @@ const emptySnapshot = (): BridgeSnapshot => ({
   threads: [],
   details: {},
   managedThreadIds: [],
+  threadLineage: {},
 });
 
 const emptyState = (): PersistedBridgeState => ({
@@ -161,9 +162,11 @@ export class BridgeStore {
         sourceCursor: item.snapshot.snapshotSequence,
         environment,
         projects: item.snapshot.projects.map((project) => normalizeProject(project, "live")),
-        threads: item.snapshot.threads.map((thread) =>
-          normalizeThread(thread, "live", managed.has(thread.id)),
-        ),
+        threads: item.snapshot.threads.map((thread) => {
+          const normalized = normalizeThread(thread, "live", managed.has(thread.id));
+          const lineage = this.state.snapshot.threadLineage[thread.id];
+          return lineage === undefined ? normalized : { ...normalized, ...lineage };
+        }),
       });
       this.appendEvent("shell.snapshot", `shell-snapshot:${item.snapshot.snapshotSequence}`, {
         freshness: "live",
@@ -202,7 +205,9 @@ export class BridgeStore {
       return;
     }
     if (item.kind === "thread-upserted") {
-      const thread = normalizeThread(item.thread, "live", managed.has(item.thread.id));
+      const normalized = normalizeThread(item.thread, "live", managed.has(item.thread.id));
+      const lineage = this.state.snapshot.threadLineage[item.thread.id];
+      const thread = lineage === undefined ? normalized : { ...normalized, ...lineage };
       this.replaceSnapshot({
         ...this.state.snapshot,
         sourceCursor: item.sequence,
@@ -229,6 +234,7 @@ export class BridgeStore {
       threads: this.state.snapshot.threads.filter((thread) => thread.id !== item.threadId),
       details: withoutKey(this.state.snapshot.details, item.threadId),
       managedThreadIds: this.state.snapshot.managedThreadIds.filter((id) => id !== item.threadId),
+      threadLineage: withoutKey(this.state.snapshot.threadLineage, item.threadId),
     });
     this.appendEvent("thread.removed", `shell:${item.sequence}`, {
       threadId: item.threadId,
@@ -290,6 +296,23 @@ export class BridgeStore {
 
   isManagedThread(threadId: string): boolean {
     return this.state.snapshot.managedThreadIds.includes(threadId);
+  }
+
+  recordThreadLineage(
+    threadId: string,
+    forkedFromThreadId: string,
+    forkMode: "native" | "contextual",
+  ): void {
+    this.replaceSnapshot({
+      ...this.state.snapshot,
+      threadLineage: {
+        ...this.state.snapshot.threadLineage,
+        [threadId]: { forkedFromThreadId, forkMode },
+      },
+      threads: this.state.snapshot.threads.map((thread) =>
+        thread.id === threadId ? { ...thread, forkedFromThreadId, forkMode } : thread,
+      ),
+    });
   }
 
   receipt(commandId: string): CommandReceiptRecord | undefined {
@@ -481,6 +504,7 @@ const minimizePersistedState = (state: PersistedBridgeState): PersistedBridgeSta
   ...state,
   snapshot: {
     ...state.snapshot,
+    threadLineage: state.snapshot.threadLineage ?? {},
     details: Object.fromEntries(
       Object.entries(state.snapshot.details).map(([threadId, detail]) => [
         threadId,

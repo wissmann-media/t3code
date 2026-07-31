@@ -8,6 +8,7 @@ import {
   decodeApprovalResponse,
   decodeCreateProject,
   decodeCreateThread,
+  decodeForkThread,
   decodePairing,
   decodeStartTurn,
   decodeThreadCommand,
@@ -18,12 +19,15 @@ import type { T3Client } from "./t3Client.ts";
 import {
   BRIDGE_API_VERSION,
   BRIDGE_VERSION,
+  LEGACY_BRIDGE_API_VERSION,
   STATUS_SCHEMA_VERSION,
   type BridgeStatusEvent,
+  type BridgeThread,
 } from "./types.ts";
 import { nowEpochMillis } from "./time.ts";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES = 512 * 1024;
 
 export class BridgePairingSession {
@@ -45,7 +49,7 @@ export class BridgePairingSession {
 }
 
 export interface BridgeServer {
-  readonly listen: (port: number) => Promise<void>;
+  readonly listen: (port: number) => Promise<number>;
   readonly close: () => Promise<void>;
 }
 
@@ -86,14 +90,15 @@ export const createBridgeServer = (options: {
 
   return {
     listen: (port) =>
-      new Promise<void>((resolve, reject) => {
+      new Promise<number>((resolve, reject) => {
         const onError = (error: Error) => {
           server.off("listening", onListening);
           reject(error);
         };
         const onListening = () => {
           server.off("error", onError);
-          resolve();
+          const address = server.address();
+          resolve(typeof address === "object" && address !== null ? address.port : port);
         };
         server.once("error", onError);
         server.once("listening", onListening);
@@ -120,11 +125,14 @@ const routeRequest = async (
 ): Promise<void> => {
   const method = request.method ?? "GET";
   const url = new NodeURL.URL(request.url ?? "/", "http://127.0.0.1");
+  const apiVersion = url.pathname === "/v2" || url.pathname.startsWith("/v2/") ? 2 : 1;
+  const path =
+    apiVersion === 2 ? `/v1${url.pathname === "/v2" ? "" : url.pathname.slice(3)}` : url.pathname;
 
-  if (method === "GET" && url.pathname === "/v1/health") {
+  if (method === "GET" && path === "/v1/health") {
     const environment = options.store.snapshot().environment;
     sendJson(response, 200, {
-      apiVersion: BRIDGE_API_VERSION,
+      apiVersion: apiVersion === 2 ? BRIDGE_API_VERSION : LEGACY_BRIDGE_API_VERSION,
       bridgeVersion: BRIDGE_VERSION,
       status: options.t3.connected() ? "live" : environment === null ? "starting" : "degraded",
       t3Connection: environment?.connection ?? "offline",
@@ -132,7 +140,7 @@ const routeRequest = async (
     return;
   }
 
-  if (method === "POST" && url.pathname === "/v1/pairing") {
+  if (method === "POST" && path === "/v1/pairing") {
     const body = await decodePairing(await readJsonBody(request));
     const token = options.pairing.exchange(body.code);
     if (token === null) {
@@ -149,60 +157,103 @@ const routeRequest = async (
     return;
   }
 
-  if (method === "GET" && url.pathname === "/v1/capabilities") {
+  if (method === "GET" && path === "/v1/capabilities") {
     sendJson(response, 200, {
-      apiVersion: BRIDGE_API_VERSION,
+      apiVersion: apiVersion === 2 ? BRIDGE_API_VERSION : LEGACY_BRIDGE_API_VERSION,
       statusSchemaVersion: STATUS_SCHEMA_VERSION,
       bridgeVersion: BRIDGE_VERSION,
       compatible: true,
       scopes: ["orchestration:read", "orchestration:operate"],
       providers: options.store.snapshot().environment?.providers ?? [],
-      capabilities: [
-        "environment.read",
-        "project.read",
-        "thread.read",
-        "thread.output.read",
-        "thread.diff.read",
-        "event.subscribe",
-        "project.create",
-        "thread.create",
-        "thread.adopt",
-        "thread.turn.start",
-        "thread.turn.interrupt",
-        "thread.session.stop",
-        "thread.approval.respond",
-        "thread.user-input.respond",
-      ],
+      capabilities:
+        apiVersion === 2
+          ? [
+              "environment.read",
+              "project.list",
+              "project.read",
+              "thread.list",
+              "thread.read",
+              "thread.output.read",
+              "thread.activity.read",
+              "thread.diff.read",
+              "event.subscribe",
+              "project.create",
+              "thread.create",
+              "thread.turn.start",
+              "thread.fork.contextual",
+              "thread.turn.interrupt",
+              "thread.session.stop",
+              "thread.approval.respond",
+              "thread.user-input.respond",
+            ]
+          : [
+              "environment.read",
+              "project.read",
+              "thread.read",
+              "thread.output.read",
+              "thread.diff.read",
+              "event.subscribe",
+              "project.create",
+              "thread.create",
+              "thread.adopt",
+              "thread.turn.start",
+              "thread.turn.interrupt",
+              "thread.session.stop",
+              "thread.approval.respond",
+              "thread.user-input.respond",
+            ],
+      ...(apiVersion === 2 ? { requiresProjectForThread: true, forkModes: ["contextual"] } : {}),
     });
     return;
   }
 
   const snapshot = options.store.snapshot();
-  if (method === "GET" && url.pathname === "/v1/environments") {
+  if (method === "GET" && path === "/v1/environments") {
     sendJson(response, 200, {
       environments: snapshot.environment === null ? [] : [snapshot.environment],
     });
     return;
   }
-  if (method === "GET" && url.pathname === "/v1/projects") {
-    sendJson(response, 200, { projects: snapshot.projects });
+  if (method === "GET" && path === "/v1/projects") {
+    sendJson(response, 200, {
+      projects: snapshot.projects.toSorted((left, right) => left.title.localeCompare(right.title)),
+    });
     return;
   }
-  if (method === "GET" && url.pathname === "/v1/threads") {
+  if (method === "GET" && path === "/v1/threads") {
     const projectId = url.searchParams.get("projectId");
-    const threads =
+    const status = url.searchParams.get("status");
+    const provider = url.searchParams.get("provider");
+    const updatedAfter = url.searchParams.get("updatedAfter");
+    const selected =
       projectId === null
         ? snapshot.threads
         : snapshot.threads.filter((thread) => thread.projectId === projectId);
-    sendJson(response, 200, { threads });
+    const sorted = selected
+      .filter((thread) => status === null || thread.status === status)
+      .filter((thread) => provider === null || thread.provider === provider)
+      .filter((thread) => updatedAfter === null || thread.updatedAt > updatedAfter)
+      .toSorted(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
+      );
+    if (apiVersion === 1) {
+      sendJson(response, 200, { threads: sorted });
+      return;
+    }
+    const offset = parseOptionalOffset(url.searchParams.get("cursor"));
+    const limit = parseOptionalLimit(url.searchParams.get("limit"));
+    const page = sorted.slice(offset, offset + limit).map(publicThread);
+    const nextCursor = offset + page.length < sorted.length ? String(offset + page.length) : null;
+    sendJson(response, 200, { threads: page, nextCursor });
     return;
   }
-  if (method === "GET" && url.pathname === "/v1/events") {
+  if (method === "GET" && path === "/v1/events") {
     streamEvents(options.store, request, response, parseCursor(url.searchParams.get("after")));
     return;
   }
 
-  const projectMatch = /^\/v1\/projects\/([^/]+)$/.exec(url.pathname);
+  const projectMatch = /^\/v1\/projects\/([^/]+)$/.exec(path);
   if (method === "GET" && projectMatch?.[1] !== undefined) {
     const projectId = decodeURIComponent(projectMatch[1]);
     const project = snapshot.projects.find((candidate) => candidate.id === projectId);
@@ -211,8 +262,9 @@ const routeRequest = async (
     return;
   }
 
-  const threadMatch = /^\/v1\/threads\/([^/]+)$/.exec(url.pathname);
-  const threadOutputMatch = /^\/v1\/threads\/([^/]+)\/output$/.exec(url.pathname);
+  const threadMatch = /^\/v1\/threads\/([^/]+)$/.exec(path);
+  const threadOutputMatch = /^\/v1\/threads\/([^/]+)\/output$/.exec(path);
+  const threadActivityMatch = /^\/v1\/threads\/([^/]+)\/activity$/.exec(path);
   if (method === "GET" && threadOutputMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(threadOutputMatch[1]);
     const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
@@ -236,21 +288,48 @@ const routeRequest = async (
     return;
   }
 
+  if (apiVersion === 2 && method === "GET" && threadActivityMatch?.[1] !== undefined) {
+    const threadId = decodeURIComponent(threadActivityMatch[1]);
+    const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+    if (thread === undefined) {
+      sendJson(response, 404, { error: "not_found" });
+    } else if (!options.t3.connected()) {
+      sendJson(response, 503, { error: "t3_unavailable" });
+    } else {
+      if (options.store.snapshot().details[threadId] === undefined) {
+        await options.t3.refreshThread(threadId);
+      }
+      sendJson(response, 200, {
+        threadId,
+        projectId: thread.projectId,
+        activity: options.store.snapshot().details[threadId]?.recentActivity ?? [],
+      });
+    }
+    return;
+  }
+
   if (method === "GET" && threadMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(threadMatch[1]);
     const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
     if (thread === undefined) {
       sendJson(response, 404, { error: "not_found" });
     } else {
-      sendJson(response, 200, { thread, detail: snapshot.details[threadId] ?? null });
+      sendJson(response, 200, {
+        thread: apiVersion === 2 ? publicThread(thread) : thread,
+        detail: snapshot.details[threadId] ?? null,
+      });
     }
     return;
   }
 
-  const diffMatch = /^\/v1\/threads\/([^/]+)\/diff$/.exec(url.pathname);
+  const diffMatch = /^\/v1\/threads\/([^/]+)\/diff$/.exec(path);
   if (method === "GET" && diffMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(diffMatch[1]);
-    const detail = snapshot.details[threadId];
+    let detail = snapshot.details[threadId];
+    if (detail === undefined && apiVersion === 2 && options.t3.connected()) {
+      await options.t3.refreshThread(threadId);
+      detail = options.store.snapshot().details[threadId];
+    }
     if (detail === undefined) {
       sendJson(response, 409, { error: "thread_detail_not_ready" });
       return;
@@ -269,7 +348,7 @@ const routeRequest = async (
     return;
   }
 
-  if (method === "POST" && url.pathname === "/v1/projects") {
+  if (method === "POST" && path === "/v1/projects") {
     sendJson(
       response,
       202,
@@ -277,7 +356,7 @@ const routeRequest = async (
     );
     return;
   }
-  if (method === "POST" && url.pathname === "/v1/threads") {
+  if (method === "POST" && path === "/v1/threads") {
     sendJson(
       response,
       202,
@@ -286,8 +365,8 @@ const routeRequest = async (
     return;
   }
 
-  const adoptMatch = /^\/v1\/threads\/([^/]+)\/adopt$/.exec(url.pathname);
-  if (method === "POST" && adoptMatch?.[1] !== undefined) {
+  const adoptMatch = /^\/v1\/threads\/([^/]+)\/adopt$/.exec(path);
+  if (apiVersion === 1 && method === "POST" && adoptMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(adoptMatch[1]);
     await decodeThreadCommand(await readJsonBody(request));
     options.commands.adopt(threadId);
@@ -295,7 +374,7 @@ const routeRequest = async (
     return;
   }
 
-  const turnMatch = /^\/v1\/threads\/([^/]+)\/turns$/.exec(url.pathname);
+  const turnMatch = /^\/v1\/threads\/([^/]+)\/turns$/.exec(path);
   if (method === "POST" && turnMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(turnMatch[1]);
     sendJson(
@@ -304,12 +383,27 @@ const routeRequest = async (
       await options.commands.startTurn(
         threadId,
         await decodeStartTurn(await readJsonBody(request)),
+        apiVersion === 2,
       ),
     );
     return;
   }
 
-  const interruptMatch = /^\/v1\/threads\/([^/]+)\/interrupt$/.exec(url.pathname);
+  const forkMatch = /^\/v1\/threads\/([^/]+)\/forks$/.exec(path);
+  if (apiVersion === 2 && method === "POST" && forkMatch?.[1] !== undefined) {
+    const sourceThreadId = decodeURIComponent(forkMatch[1]);
+    sendJson(
+      response,
+      202,
+      await options.commands.forkThread(
+        sourceThreadId,
+        await decodeForkThread(await readJsonBody(request)),
+      ),
+    );
+    return;
+  }
+
+  const interruptMatch = /^\/v1\/threads\/([^/]+)\/interrupt$/.exec(path);
   if (method === "POST" && interruptMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(interruptMatch[1]);
     sendJson(
@@ -318,38 +412,47 @@ const routeRequest = async (
       await options.commands.interrupt(
         threadId,
         await decodeThreadCommand(await readJsonBody(request)),
+        apiVersion === 2,
       ),
     );
     return;
   }
 
-  const stopMatch = /^\/v1\/threads\/([^/]+)\/stop$/.exec(url.pathname);
+  const stopMatch = /^\/v1\/threads\/([^/]+)\/stop$/.exec(path);
   if (method === "POST" && stopMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(stopMatch[1]);
     sendJson(
       response,
       202,
-      await options.commands.stop(threadId, await decodeThreadCommand(await readJsonBody(request))),
+      await options.commands.stop(
+        threadId,
+        await decodeThreadCommand(await readJsonBody(request)),
+        apiVersion === 2,
+      ),
     );
     return;
   }
 
-  const approvalMatch = /^\/v1\/approvals\/([^/]+)\/respond$/.exec(url.pathname);
+  const approvalMatch = /^\/v1\/approvals\/([^/]+)\/respond$/.exec(path);
   if (method === "POST" && approvalMatch?.[1] !== undefined) {
     const requestId = decodeURIComponent(approvalMatch[1]);
     const body = await decodeApprovalResponse(await readJsonBody(request));
-    sendJson(response, 202, await options.commands.respondApproval(body.threadId, requestId, body));
+    sendJson(
+      response,
+      202,
+      await options.commands.respondApproval(body.threadId, requestId, body, apiVersion === 2),
+    );
     return;
   }
 
-  const inputMatch = /^\/v1\/user-input\/([^/]+)\/respond$/.exec(url.pathname);
+  const inputMatch = /^\/v1\/user-input\/([^/]+)\/respond$/.exec(path);
   if (method === "POST" && inputMatch?.[1] !== undefined) {
     const requestId = decodeURIComponent(inputMatch[1]);
     const body = await decodeUserInputResponse(await readJsonBody(request));
     sendJson(
       response,
       202,
-      await options.commands.respondUserInput(body.threadId, requestId, body),
+      await options.commands.respondUserInput(body.threadId, requestId, body, apiVersion === 2),
     );
     return;
   }
@@ -401,7 +504,11 @@ const readJsonBody = async (request: NodeHttp.IncomingMessage): Promise<unknown>
 };
 
 const sendJson = (response: NodeHttp.ServerResponse, status: number, value: unknown): void => {
-  const body = Buffer.from(`${JSON.stringify(value)}\n`);
+  let body = Buffer.from(`${JSON.stringify(value)}\n`);
+  if (body.length > MAX_RESPONSE_BYTES) {
+    status = 507;
+    body = Buffer.from('{"error":"response_too_large"}\n');
+  }
   response.writeHead(status, {
     "Cache-Control": "no-store",
     "Content-Type": "application/json; charset=utf-8",
@@ -409,6 +516,26 @@ const sendJson = (response: NodeHttp.ServerResponse, status: number, value: unkn
     "X-Content-Type-Options": "nosniff",
   });
   response.end(body);
+};
+
+const parseOptionalOffset = (value: string | null): number => {
+  if (value === null || value === "") return 0;
+  if (!/^[0-9]+$/.test(value)) throw new RequestBodyError(400, "invalid_cursor");
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset) || offset > 100_000) {
+    throw new RequestBodyError(400, "invalid_cursor");
+  }
+  return offset;
+};
+
+const parseOptionalLimit = (value: string | null): number => {
+  if (value === null || value === "") return 200;
+  if (!/^[0-9]+$/.test(value)) throw new RequestBodyError(400, "invalid_limit");
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    throw new RequestBodyError(400, "invalid_limit");
+  }
+  return limit;
 };
 
 const parseCursor = (value: string | null): number => {
@@ -453,4 +580,9 @@ const streamEvents = (
 
 const writeEvent = (response: NodeHttp.ServerResponse, event: BridgeStatusEvent): void => {
   response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+};
+
+const publicThread = (thread: BridgeThread): Omit<BridgeThread, "managed"> => {
+  const { managed: _managed, ...value } = thread;
+  return value;
 };
