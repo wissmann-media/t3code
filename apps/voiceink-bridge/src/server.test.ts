@@ -6,6 +6,7 @@ import type {
 import { describe, expect, it } from "vite-plus/test";
 
 import { BridgeCommandService } from "./commands.ts";
+import { ConsultationService } from "./consultation.ts";
 import { WorkspaceService } from "./workspace.ts";
 import { BridgePairingSession, createBridgeServer } from "./server.ts";
 import { BridgeStore } from "./store.ts";
@@ -994,6 +995,7 @@ const withServer = async (
     store,
     commands,
     workspaces: new WorkspaceService(store, commands),
+    consultations: new ConsultationService(store, commands, t3),
     t3,
     bearerToken,
     pairing: new BridgePairingSession(bearerToken),

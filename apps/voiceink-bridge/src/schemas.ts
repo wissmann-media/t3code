@@ -220,3 +220,22 @@ export const decodeWorkspaceTransition = Schema.decodeUnknownPromise(WorkspaceTr
 export const decodeWorkspaceMaterialize = Schema.decodeUnknownPromise(WorkspaceMaterializeRequest, {
   onExcessProperty: "error",
 });
+
+// Consultation contracts (plan phase 6).
+
+export const ConsultationStartRequest = Schema.Struct({
+  consultationId: CommandId,
+  workspaceId: Schema.optional(Identifier),
+  projectId: Schema.optional(Identifier),
+  sourceThreadId: Schema.optional(Identifier),
+  question: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8_000)),
+  modelSelection: Schema.optional(Schema.Struct({ instanceId: Identifier, model: Identifier })),
+  timeoutMs: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1_000, maximum: 3_600_000 })),
+  ),
+});
+export type ConsultationStartRequest = typeof ConsultationStartRequest.Type;
+
+export const decodeConsultationStart = Schema.decodeUnknownPromise(ConsultationStartRequest, {
+  onExcessProperty: "error",
+});

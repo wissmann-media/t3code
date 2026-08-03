@@ -17,11 +17,13 @@ import {
   decodeStartTurn,
   decodeThreadCommand,
   decodeUserInputResponse,
+  decodeConsultationStart,
   decodeWorkspaceCreate,
   decodeWorkspaceMaterialize,
   decodeWorkspacePatch,
   decodeWorkspaceTransition,
 } from "./schemas.ts";
+import { ConsultationError, ConsultationService } from "./consultation.ts";
 import { WorkspaceError, WorkspaceService } from "./workspace.ts";
 import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
@@ -74,6 +76,7 @@ export const createBridgeServer = (options: {
   readonly store: BridgeStore;
   readonly commands: BridgeCommandService;
   readonly workspaces: WorkspaceService;
+  readonly consultations: ConsultationService;
   readonly t3: T3Client;
   readonly bearerToken: string;
   readonly pairing: BridgePairingSession;
@@ -101,6 +104,16 @@ export const createBridgeServer = (options: {
       if (error instanceof WorkspaceError) {
         const status =
           error.code === "not_found" ? 404 : error.code === "draft_incomplete" ? 422 : 409;
+        sendJson(response, status, { error: error.code });
+        return;
+      }
+      if (error instanceof ConsultationError) {
+        const status =
+          error.code === "provider_cannot_guarantee_non_mutation"
+            ? 422
+            : error.code === "provider_unavailable"
+              ? 503
+              : 404;
         sendJson(response, status, { error: error.code });
         return;
       }
@@ -162,6 +175,7 @@ const routeRequest = async (
     readonly store: BridgeStore;
     readonly commands: BridgeCommandService;
     readonly workspaces: WorkspaceService;
+    readonly consultations: ConsultationService;
     readonly t3: T3Client;
     readonly bearerToken: string;
     readonly pairing: BridgePairingSession;
@@ -238,6 +252,33 @@ const routeRequest = async (
     ))
   ) {
     return;
+  }
+
+  if (apiVersion === 3 && path === "/v1/consultations") {
+    if (method === "GET") {
+      sendJson(response, 200, { consultations: options.consultations.list() });
+      return;
+    }
+    if (method === "POST") {
+      const body = await decodeConsultationStart(await readJsonBody(request));
+      sendJson(response, 202, { consultation: await options.consultations.start(body) });
+      return;
+    }
+  }
+
+  const consultationMatch = /^\/v1\/consultations\/([^/]+)(\/cancel)?$/.exec(path);
+  if (apiVersion === 3 && consultationMatch?.[1] !== undefined) {
+    const consultationId = decodeURIComponent(consultationMatch[1]);
+    if (method === "GET" && consultationMatch[2] === undefined) {
+      sendJson(response, 200, { consultation: options.consultations.get(consultationId) });
+      return;
+    }
+    if (method === "POST" && consultationMatch[2] === "/cancel") {
+      sendJson(response, 200, {
+        consultation: await options.consultations.cancel(consultationId),
+      });
+      return;
+    }
   }
 
   if (apiVersion === 3 && path === "/v1/workspaces") {
