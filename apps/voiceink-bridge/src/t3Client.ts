@@ -17,7 +17,9 @@ import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   type OrchestrationThreadShell,
+  type ServerProvider,
   ThreadId,
+  WS_METHODS,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -31,7 +33,12 @@ import * as Socket from "effect/unstable/socket/Socket";
 
 import { isAttentionThread } from "./normalization.ts";
 import { normalizeThreadOutput } from "./normalization.ts";
-import type { BridgeThreadOutput, T3BridgeCallbacks, T3ShellItem } from "./types.ts";
+import type {
+  BridgeProvider,
+  BridgeThreadOutput,
+  T3BridgeCallbacks,
+  T3ShellItem,
+} from "./types.ts";
 
 const httpLayer = remoteHttpClientLayer((input, init) => globalThis.fetch(input, init));
 const rpcLayer = rpcSessionFactoryLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
@@ -39,6 +46,23 @@ const runtime = ManagedRuntime.make(Layer.merge(httpLayer, rpcLayer));
 const decodeCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand, {
   onExcessProperty: "error",
 });
+
+const normalizeProviders = (
+  providers: ReadonlyArray<ServerProvider>,
+): ReadonlyArray<BridgeProvider> =>
+  providers.map((provider) => ({
+    instanceId: provider.instanceId,
+    driver: provider.driver,
+    enabled: provider.enabled,
+    installed: provider.installed,
+    state: provider.status,
+    authStatus: provider.auth.status,
+    models: provider.models.map((model) => ({
+      slug: model.slug,
+      name: model.name,
+      isDefault: model.isDefault === true,
+    })),
+  }));
 
 export interface T3Client {
   readonly start: (afterSequence: number, attentionThreadIds?: ReadonlyArray<string>) => void;
@@ -112,20 +136,25 @@ export class EffectT3Client implements T3Client {
           id: descriptor.environmentId,
           label: descriptor.label,
           serverVersion: descriptor.serverVersion,
-          providers: config.providers.map((provider) => ({
-            instanceId: provider.instanceId,
-            driver: provider.driver,
-            enabled: provider.enabled,
-            installed: provider.installed,
-            state: provider.status,
-            authStatus: provider.auth.status,
-            models: provider.models.map((model) => ({
-              slug: model.slug,
-              name: model.name,
-              isDefault: model.isDefault === true,
-            })),
-          })),
+          providers: normalizeProviders(config.providers),
         });
+
+        yield* session.client[WS_METHODS.subscribeServerConfig]({}).pipe(
+          Stream.runForEach((event) => {
+            if (event.type === "snapshot") {
+              return Effect.sync(() =>
+                bridge.callbacks.onProviderStatuses(normalizeProviders(event.config.providers)),
+              );
+            }
+            if (event.type === "providerStatuses") {
+              return Effect.sync(() =>
+                bridge.callbacks.onProviderStatuses(normalizeProviders(event.payload.providers)),
+              );
+            }
+            return Effect.void;
+          }),
+          Effect.forkScoped,
+        );
 
         const watched = new Set<string>();
         const watchThreadId = Effect.fn("VoiceInkBridge.watchThreadId")(function* (

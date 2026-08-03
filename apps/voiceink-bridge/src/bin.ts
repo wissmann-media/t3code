@@ -51,6 +51,8 @@ const run = async (): Promise<void> => {
       readonly serverVersion: string;
       readonly providers: BridgeEnvironment["providers"];
     }) => store.markConnected(environment),
+    onProviderStatuses: (providers: BridgeEnvironment["providers"]) =>
+      store.updateProviders(providers),
     onDisconnected: (reason: string) => store.markDisconnected(reason),
     onShellItem: (item: Parameters<BridgeStore["applyShellItem"]>[0]) => store.applyShellItem(item),
     onThreadItem: (threadId: string, item: Parameters<BridgeStore["applyThreadItem"]>[1]) =>
@@ -96,6 +98,7 @@ const run = async (): Promise<void> => {
 const noOpCallbacks = {
   onConnecting: () => {},
   onConnected: () => {},
+  onProviderStatuses: () => {},
   onDisconnected: () => {},
   onShellItem: () => {},
   onThreadItem: () => {},

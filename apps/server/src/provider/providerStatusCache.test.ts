@@ -121,7 +121,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
-  it("hydrates cached provider status while preserving current settings-derived models", () => {
+  it("hydrates cached inventory without advertising it as ready for new turns", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",
       models: [
@@ -172,12 +172,12 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
         ],
         installed: cachedCodex.installed,
         version: cachedCodex.version,
-        status: cachedCodex.status,
-        auth: cachedCodex.auth,
+        status: "warning",
+        auth: { ...cachedCodex.auth, status: "unknown" },
         checkedAt: cachedCodex.checkedAt,
         slashCommands: cachedCodex.slashCommands,
         skills: cachedCodex.skills,
-        message: cachedCodex.message,
+        message: "Cached provider inventory is being refreshed before new turns can start.",
       },
     );
   });

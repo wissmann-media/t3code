@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
 import * as NodeTimers from "node:timers";
 import * as NodeURL from "node:url";
+import * as Schema from "effect/Schema";
 
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
 import {
@@ -80,6 +81,12 @@ export const createBridgeServer = (options: {
         sendJson(response, error.status, { error: error.code });
         return;
       }
+      if (Schema.isSchemaError(error)) {
+        logRequestFailure(request, "invalid request", error);
+        sendJson(response, 422, { error: "invalid_request" });
+        return;
+      }
+      logRequestFailure(request, "internal error", error);
       sendJson(response, 500, { error: "internal_error" });
     });
   });
@@ -110,6 +117,17 @@ export const createBridgeServer = (options: {
         server.closeAllConnections();
       }),
   };
+};
+
+const logRequestFailure = (
+  request: NodeHttp.IncomingMessage,
+  kind: string,
+  error: unknown,
+): void => {
+  const method = request.method ?? "UNKNOWN";
+  const path = new NodeURL.URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(0, 240);
+  const errorType = error instanceof Error ? error.name : typeof error;
+  process.stderr.write(`VoiceInk T3 Bridge ${kind}: ${method} ${path} (${errorType})\n`);
 };
 
 const routeRequest = async (

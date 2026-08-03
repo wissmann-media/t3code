@@ -8,6 +8,7 @@ import { normalizeProject, normalizeThread } from "./normalization.ts";
 import { nowIso } from "./time.ts";
 import type {
   BridgeEnvironment,
+  BridgeActivityRequest,
   BridgeProject,
   BridgeSnapshot,
   BridgeStatusEvent,
@@ -109,6 +110,15 @@ export class BridgeStore {
         serverVersion: environment.serverVersion,
         providerCount: next.providers.length,
       },
+    });
+  }
+
+  updateProviders(providers: BridgeEnvironment["providers"]): void {
+    const environment = this.state.snapshot.environment;
+    if (environment === null) return;
+    this.replaceSnapshot({
+      ...this.state.snapshot,
+      environment: { ...environment, providers },
     });
   }
 
@@ -440,6 +450,7 @@ const normalizeThreadDetail = (
     latestAssistantText: null,
     recentActivity: thread.activities.slice(-20).map((activity) => {
       const requestId = requestIdFromPayload(activity.payload);
+      const request = requestDetailsFromActivity(activity.payload, activity.kind);
       return {
         id: activity.id,
         tone: activity.tone,
@@ -447,6 +458,7 @@ const normalizeThreadDetail = (
         summary: minimizedActivitySummary(activity.tone),
         createdAt: activity.createdAt,
         ...(requestId === null ? {} : { requestId }),
+        ...(request === undefined ? {} : { request }),
       };
     }),
   };
@@ -465,6 +477,7 @@ const applyThreadDetailEvent = (
   }
   const activity = event.payload.activity;
   const requestId = requestIdFromPayload(activity.payload);
+  const request = requestDetailsFromActivity(activity.payload, activity.kind);
   const normalized = {
     id: activity.id,
     tone: activity.tone,
@@ -472,6 +485,7 @@ const applyThreadDetailEvent = (
     summary: minimizedActivitySummary(activity.tone),
     createdAt: activity.createdAt,
     ...(requestId === null ? {} : { requestId }),
+    ...(request === undefined ? {} : { request }),
   };
   return {
     threadId,
@@ -525,4 +539,70 @@ const requestIdFromPayload = (payload: unknown): string | null => {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) return null;
   const requestId = payload.requestId;
   return typeof requestId === "string" && requestId.length <= 240 ? requestId : null;
+};
+
+const requestDetailsFromActivity = (
+  payload: unknown,
+  kind: string,
+): BridgeActivityRequest | undefined => {
+  const record = asRecord(payload);
+  const requestId = requestIdFromPayload(payload);
+  if (record === null || requestId === null) return undefined;
+
+  if (kind === "user-input.requested") {
+    const rawQuestions = Array.isArray(record.questions) ? record.questions : [];
+    const questions = rawQuestions
+      .map(parseUserInputQuestion)
+      .filter((question): question is NonNullable<typeof question> => question !== undefined);
+    return questions.length > 0 ? { kind: "user-input", requestId, questions } : undefined;
+  }
+
+  if (kind !== "approval.requested") return undefined;
+  const requestKind = boundedString(record.requestKind, 80);
+  const requestType = boundedString(record.requestType, 120);
+  if (requestKind === undefined && requestType === undefined) return undefined;
+  return {
+    kind: "approval",
+    requestId,
+    ...(requestKind === undefined ? {} : { requestKind }),
+    ...(requestType === undefined ? {} : { requestType }),
+  };
+};
+
+const parseUserInputQuestion = (value: unknown) => {
+  const record = asRecord(value);
+  if (record === null) return undefined;
+  const id = boundedString(record.id, 240);
+  const header = boundedString(record.header, 240);
+  const question = boundedString(record.question, 4_000);
+  if (id === undefined || header === undefined || question === undefined) return undefined;
+  const rawOptions = Array.isArray(record.options) ? record.options : [];
+  const options = rawOptions
+    .map((option) => {
+      const optionRecord = asRecord(option);
+      const label = boundedString(optionRecord?.label, 500);
+      const description = boundedString(optionRecord?.description, 2_000);
+      return label === undefined || description === undefined ? undefined : { label, description };
+    })
+    .filter((option): option is { label: string; description: string } => option !== undefined)
+    .slice(0, 32);
+  return {
+    id,
+    header,
+    question,
+    options,
+    multiSelect: record.multiSelect === true,
+  };
+};
+
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+};
+
+const boundedString = (value: unknown, maximum: number): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= maximum ? trimmed : undefined;
 };

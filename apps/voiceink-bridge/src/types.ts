@@ -104,7 +104,35 @@ export interface BridgeThreadDetail {
     readonly summary: string;
     readonly createdAt: string;
     readonly requestId?: string;
+    /** Safe, structured details for an outstanding T3 interaction. */
+    readonly request?: BridgeActivityRequest;
   }>;
+}
+
+export interface BridgeUserInputQuestionOption {
+  readonly label: string;
+  readonly description: string;
+}
+
+export interface BridgeUserInputQuestion {
+  readonly id: string;
+  readonly header: string;
+  readonly question: string;
+  readonly options: ReadonlyArray<BridgeUserInputQuestionOption>;
+  readonly multiSelect: boolean;
+}
+
+/**
+ * A redacted interaction request. The bridge deliberately exposes only the
+ * fields needed to complete the request and never forwards the raw provider
+ * payload (which can contain commands, paths, or transcript material).
+ */
+export interface BridgeActivityRequest {
+  readonly kind: "approval" | "user-input";
+  readonly requestId: string;
+  readonly requestKind?: string;
+  readonly requestType?: string;
+  readonly questions?: ReadonlyArray<BridgeUserInputQuestion>;
 }
 
 export interface BridgeThreadOutput {
@@ -185,6 +213,7 @@ export interface T3BridgeCallbacks {
     readonly serverVersion: string;
     readonly providers: ReadonlyArray<BridgeProvider>;
   }) => void;
+  readonly onProviderStatuses: (providers: ReadonlyArray<BridgeProvider>) => void;
   readonly onDisconnected: (reason: string) => void;
   readonly onShellItem: (item: T3ShellItem) => void;
   readonly onThreadItem: (threadId: string, item: T3ThreadItem) => void;

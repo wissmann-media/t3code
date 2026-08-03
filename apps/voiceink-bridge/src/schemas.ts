@@ -1,3 +1,4 @@
+import { ProviderOptionSelections } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const Identifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(240));
@@ -6,7 +7,7 @@ const NonEmptyText = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLeng
 const ModelSelection = Schema.Struct({
   instanceId: Identifier,
   model: Identifier,
-  options: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  options: Schema.optional(ProviderOptionSelections),
 });
 
 const CommandBase = {

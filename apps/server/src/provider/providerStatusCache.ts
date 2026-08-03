@@ -62,16 +62,20 @@ export const hydrateCachedProvider = (input: {
     models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,
-    status: input.cachedProvider.status,
-    auth: input.cachedProvider.auth,
+    // Cached inventory is useful for rendering immediately, but it is not
+    // proof that the provider or any cached model still accepts new turns.
+    // Keep it visibly pending until the live probe replaces this snapshot.
+    status: "warning",
+    auth: { ...input.cachedProvider.auth, status: "unknown" },
     checkedAt: input.cachedProvider.checkedAt,
     slashCommands: input.cachedProvider.slashCommands,
     skills: input.cachedProvider.skills,
   };
 
-  return input.cachedProvider.message
-    ? { ...hydratedProvider, message: input.cachedProvider.message }
-    : hydratedProvider;
+  return {
+    ...hydratedProvider,
+    message: "Cached provider inventory is being refreshed before new turns can start.",
+  };
 };
 
 /**

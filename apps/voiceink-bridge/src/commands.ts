@@ -78,8 +78,24 @@ export class BridgeCommandService {
     request: StartTurnRequest,
     universal = false,
   ): Promise<CommandReceipt> {
-    if (universal) this.prepareThread(threadId);
-    else this.requireManaged(threadId);
+    const thread = universal ? this.prepareThread(threadId) : this.requireManaged(threadId);
+    if (thread !== undefined && request.runtimeMode !== thread.runtimeMode) {
+      const commandId = childCommandId(request.commandId, "runtime-mode");
+      const runtimeReceipt = await this.dispatch(
+        commandId,
+        { commandId, threadId, runtimeMode: request.runtimeMode },
+        {
+          type: "thread.runtime-mode.set",
+          commandId,
+          threadId,
+          runtimeMode: request.runtimeMode,
+          createdAt: nowIso(),
+        },
+      );
+      if (runtimeReceipt.status !== "accepted") {
+        return { ...runtimeReceipt, commandId: request.commandId };
+      }
+    }
     return this.dispatch(request.commandId, request, {
       type: "thread.turn.start",
       commandId: request.commandId,
@@ -211,19 +227,25 @@ export class BridgeCommandService {
     };
   }
 
-  private requireManaged(threadId: string): void {
+  private requireManaged(threadId: string) {
     this.requireFresh();
     if (!this.store.isManagedThread(threadId)) throw new BridgeCommandError("not_managed");
+    return this.store.snapshot().threads.find((candidate) => candidate.id === threadId);
   }
 
   private prepareThread(threadId: string) {
+    const thread = this.liveThread(threadId);
+    this.store.manageThread(threadId);
+    return thread;
+  }
+
+  private liveThread(threadId: string) {
     this.requireFresh();
     const thread = this.store.snapshot().threads.find((candidate) => candidate.id === threadId);
     if (thread === undefined || thread.ownership !== "t3code") {
       throw new BridgeCommandError("not_found");
     }
     if (thread.freshness !== "live") throw new BridgeCommandError("stale_state");
-    this.store.manageThread(threadId);
     return thread;
   }
 

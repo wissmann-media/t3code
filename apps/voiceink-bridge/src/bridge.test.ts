@@ -137,6 +137,58 @@ describe("bounded thread output", () => {
 });
 
 describe("BridgeStore", () => {
+  it("replaces stale provider models when T3 publishes a refreshed catalog", () => {
+    const store = new BridgeStore();
+    store.markConnected({
+      id: "environment-1",
+      label: "Local T3",
+      serverVersion: "0.0.31",
+      providers: [
+        {
+          instanceId: "opencode",
+          driver: "opencode",
+          enabled: true,
+          installed: true,
+          state: "ready",
+          authStatus: "authenticated",
+          models: [
+            {
+              slug: "openrouter/aion-labs/aion-1.0",
+              name: "Aion 1.0",
+              isDefault: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    store.updateProviders([
+      {
+        instanceId: "opencode",
+        driver: "opencode",
+        enabled: true,
+        installed: true,
+        state: "ready",
+        authStatus: "authenticated",
+        models: [
+          {
+            slug: "openrouter/aion-labs/aion-2.0",
+            name: "Aion 2.0",
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+
+    expect(store.snapshot().environment?.providers[0]?.models).toEqual([
+      {
+        slug: "openrouter/aion-labs/aion-2.0",
+        name: "Aion 2.0",
+        isDefault: true,
+      },
+    ]);
+  });
+
   it("deduplicates replayed shell events by source sequence", () => {
     const store = new BridgeStore();
     store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.31" });
@@ -320,6 +372,65 @@ describe("BridgeStore", () => {
     ]);
     expect(JSON.stringify(store.snapshot())).not.toContain("private command");
     expect(JSON.stringify(store.snapshot())).not.toContain("private approval detail");
+  });
+
+  it("projects safe structured user-input questions for the voice bridge", () => {
+    const store = liveStore();
+    store.applyThreadItem("thread-1", {
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 20,
+        thread: {
+          id: "thread-1",
+          projectId: "project-1",
+          messages: [],
+          checkpoints: [],
+          activities: [
+            {
+              id: "activity-input",
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              createdAt: "2026-07-30T12:00:02Z",
+              payload: {
+                requestId: "input-1",
+                questions: [
+                  {
+                    id: "scope",
+                    header: "Prüfumfang",
+                    question: "Soll die gesamte Folgekette einbezogen werden?",
+                    options: [
+                      { label: "End-to-End", description: "Alles prüfen." },
+                      { label: "Nur XML-Pipeline", description: "Nur XML prüfen." },
+                    ],
+                    multiSelect: false,
+                  },
+                ],
+                secret: "must not cross the bridge",
+              },
+            },
+          ],
+        } as unknown as OrchestrationThread,
+      },
+    });
+
+    expect(store.snapshot().details["thread-1"]?.recentActivity[0]?.request).toEqual({
+      kind: "user-input",
+      requestId: "input-1",
+      questions: [
+        {
+          id: "scope",
+          header: "Prüfumfang",
+          question: "Soll die gesamte Folgekette einbezogen werden?",
+          options: [
+            { label: "End-to-End", description: "Alles prüfen." },
+            { label: "Nur XML-Pipeline", description: "Nur XML prüfen." },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+    expect(JSON.stringify(store.snapshot())).not.toContain("must not cross the bridge");
   });
 });
 

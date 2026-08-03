@@ -107,7 +107,7 @@ describe("Bridge HTTP routes", () => {
         commandId: "turn-command",
         messageId: "message-1",
         text: "Continue the analysis.",
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: "default",
       };
       const legacy = await authorizedFetch(`${baseUrl}/v1/threads/thread-1/turns`, {
@@ -122,8 +122,16 @@ describe("Bridge HTTP routes", () => {
       });
       expect(response.status).toBe(202);
       expect(store.isManagedThread("thread-1")).toBe(true);
-      expect(dispatched).toHaveLength(1);
-      expect(dispatched[0]).toMatchObject({ type: "thread.turn.start", threadId: "thread-1" });
+      expect(dispatched).toHaveLength(2);
+      expect(dispatched[0]).toMatchObject({
+        type: "thread.runtime-mode.set",
+        threadId: "thread-1",
+        runtimeMode: "full-access",
+      });
+      expect(dispatched[1]).toMatchObject({
+        type: "thread.turn.start",
+        threadId: "thread-1",
+      });
     });
   });
 
@@ -241,7 +249,11 @@ describe("Bridge HTTP routes", () => {
             threadId: "thread-new",
             projectId: "project-1",
             title: "New thread",
-            modelSelection: { instanceId: "codex-default", model: "gpt-test" },
+            modelSelection: {
+              instanceId: "codex-default",
+              model: "gpt-test",
+              options: [{ id: "reasoningEffort", value: "xhigh" }],
+            },
             runtimeMode: "approval-required",
             interactionMode: "default",
             branch: null,
@@ -282,6 +294,39 @@ describe("Bridge HTTP routes", () => {
         "thread.approval.respond",
         "thread.user-input.respond",
       ]);
+      expect(dispatched[1]).toMatchObject({
+        type: "thread.create",
+        modelSelection: {
+          instanceId: "codex-default",
+          model: "gpt-test",
+          options: [{ id: "reasoningEffort", value: "xhigh" }],
+        },
+      });
+    });
+  });
+
+  it("returns a contract error instead of 500 for invalid model options", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const response = await authorizedFetch(`${baseUrl}/v2/threads`, {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: "invalid-options",
+          threadId: "thread-invalid",
+          projectId: "project-1",
+          title: "Invalid options",
+          modelSelection: {
+            instanceId: "codex-default",
+            model: "gpt-test",
+            options: [{ id: "reasoningEffort", value: 42 }],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }),
+      });
+
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: "invalid_request" });
+      expect(dispatched).toHaveLength(0);
     });
   });
 
