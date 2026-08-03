@@ -740,6 +740,248 @@ describe("Bridge v3 canonical surface", () => {
   });
 });
 
+describe("Bridge v3 read surface", () => {
+  it("searches active and archived threads with German folding and merged content matches", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const archived = await authorizedFetch(`${baseUrl}/v3/search?q=ubersicht`);
+      expect(archived.status).toBe(200);
+      const archivedBody = (await archived.json()) as {
+        results: Array<{ threadId: string; archived: boolean; matchedBy: string[] }>;
+      };
+      expect(archivedBody.results).toHaveLength(1);
+      expect(archivedBody.results[0]).toMatchObject({
+        threadId: "thread-archived",
+        archived: true,
+        matchedBy: ["title"],
+      });
+
+      const content = await authorizedFetch(`${baseUrl}/v3/search?q=Importer`);
+      expect(content.status).toBe(200);
+      const contentBody = (await content.json()) as {
+        results: Array<{ threadId: string; snippet?: string; matchedBy: string[] }>;
+      };
+      const contentRow = contentBody.results.find((row) => row.threadId === "thread-1");
+      expect(contentRow).toBeDefined();
+      expect(contentRow!.matchedBy).toContain("content:assistant");
+      expect(contentRow!.snippet).toContain("[REDACTED]");
+      expect(contentRow!.snippet).not.toContain("password=abc");
+
+      const filtered = await authorizedFetch(`${baseUrl}/v3/search?q=ubersicht&scope=active`);
+      expect(((await filtered.json()) as { results: unknown[] }).results).toHaveLength(0);
+
+      const invalid = await authorizedFetch(`${baseUrl}/v3/search?q=a`);
+      expect(invalid.status).toBe(400);
+    });
+  });
+
+  it("serves paginated redacted messages with attachment metadata and chunk reads", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const firstPage = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/messages?limit=2`);
+      expect(firstPage.status).toBe(200);
+      const body = (await firstPage.json()) as {
+        messages: Array<{
+          id: string;
+          role: string;
+          text: string;
+          attachments: Array<{ name: string; sizeBytes: number }>;
+        }>;
+        totalMessages: number;
+        nextCursor: string | null;
+      };
+      expect(body.totalMessages).toBe(3);
+      expect(body.messages.map((message) => message.id)).toEqual(["message-1", "message-2"]);
+      expect(body.nextCursor).toBe("2");
+      const assistant = body.messages[1]!;
+      expect(assistant.text).toContain("[REDACTED]");
+      expect(assistant.text).not.toContain("super-geheim-123");
+      expect(assistant.attachments).toEqual([
+        {
+          type: "image",
+          id: "attachment-1",
+          name: "diagramm.png",
+          mimeType: "image/png",
+          sizeBytes: 2_048,
+        },
+      ]);
+
+      const secondPage = await authorizedFetch(
+        `${baseUrl}/v3/threads/thread-1/messages?limit=2&cursor=2`,
+      );
+      const second = (await secondPage.json()) as {
+        messages: Array<{ id: string }>;
+        nextCursor: string | null;
+      };
+      expect(second.messages.map((message) => message.id)).toEqual(["message-3"]);
+      expect(second.nextCursor).toBeNull();
+
+      const chunk = await authorizedFetch(
+        `${baseUrl}/v3/threads/thread-1/messages/message-2?offset=10`,
+      );
+      expect(chunk.status).toBe(200);
+      const chunkBody = (await chunk.json()) as {
+        offset: number;
+        text: string;
+        totalLength: number;
+        nextOffset: number | null;
+      };
+      expect(chunkBody.offset).toBe(10);
+      expect(chunkBody.totalLength).toBeGreaterThan(1_000);
+      expect(chunkBody.nextOffset).toBeNull();
+
+      const missing = await authorizedFetch(`${baseUrl}/v3/threads/thread-unknown/messages`);
+      expect(missing.status).toBe(404);
+    });
+  });
+
+  it("serves paginated activities and pending interactions with exact request IDs", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const activities = await authorizedFetch(
+        `${baseUrl}/v3/threads/thread-1/activities?limit=2&cursor=1`,
+      );
+      expect(activities.status).toBe(200);
+      const body = (await activities.json()) as {
+        activities: Array<{ id: string; requestId?: string }>;
+        totalActivities: number;
+      };
+      expect(body.totalActivities).toBe(3);
+      expect(body.activities.map((activity) => activity.id)).toEqual(["activity-2", "activity-3"]);
+      expect(body.activities[0]!.requestId).toBe("request-1");
+
+      const interactions = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/interactions`);
+      expect(interactions.status).toBe(200);
+      const interactionBody = (await interactions.json()) as {
+        requests: Array<{
+          kind: string;
+          requestId: string;
+          questions?: Array<{ id: string; options: Array<{ label: string }> }>;
+        }>;
+      };
+      expect(interactionBody.requests).toHaveLength(2);
+      expect(interactionBody.requests[0]).toMatchObject({
+        kind: "user-input",
+        requestId: "request-2",
+      });
+      expect(
+        interactionBody.requests[0]!.questions![0]!.options.map((option) => option.label),
+      ).toEqual(["Option A", "Option B"]);
+      expect(interactionBody.requests[1]).toMatchObject({
+        kind: "approval",
+        requestId: "request-1",
+        requestKind: "command",
+      });
+    });
+  });
+
+  it("serves checkpoints with revert targets and turn diffs with explicit counts", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const checkpoints = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/checkpoints`);
+      expect(checkpoints.status).toBe(200);
+      const body = (await checkpoints.json()) as {
+        checkpoints: Array<{
+          checkpointRef: string;
+          revertTarget: { command: string; turnCount: number };
+          files: Array<{ path: string }>;
+        }>;
+      };
+      expect(body.checkpoints).toHaveLength(1);
+      expect(body.checkpoints[0]!.checkpointRef).toBe("refs/t3/checkpoints/turn-1");
+      expect(body.checkpoints[0]!.revertTarget).toEqual({
+        command: "thread.checkpoint.revert",
+        turnCount: 1,
+      });
+
+      const diff = await authorizedFetch(
+        `${baseUrl}/v3/threads/thread-1/turn-diff?fromTurnCount=0&toTurnCount=1`,
+      );
+      expect(diff.status).toBe(200);
+      expect(await diff.json()).toMatchObject({
+        threadId: "thread-1",
+        diff: "diff --git a/src/importer.ts b/src/importer.ts",
+        fromTurnCount: 0,
+        toTurnCount: 1,
+      });
+
+      const invalid = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/turn-diff`);
+      expect(invalid.status).toBe(400);
+    });
+  });
+
+  it("serves redacted proposed plans referencable at turn start", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const plans = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/plans`);
+      expect(plans.status).toBe(200);
+      const body = (await plans.json()) as {
+        plans: Array<{
+          id: string;
+          planMarkdown: string;
+          sourceReference: { threadId: string; planId: string };
+        }>;
+      };
+      expect(body.plans).toHaveLength(1);
+      expect(body.plans[0]!.planMarkdown).toContain("[REDACTED]");
+      expect(body.plans[0]!.planMarkdown).not.toContain("hunter2");
+      expect(body.plans[0]!.sourceReference).toEqual({ threadId: "thread-1", planId: "plan-1" });
+
+      const missing = await authorizedFetch(
+        `${baseUrl}/v3/threads/thread-1/plans?planId=plan-unknown`,
+      );
+      expect(missing.status).toBe(404);
+    });
+  });
+
+  it("serves a bounded spoken summary instead of the fixed output contract", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const summary = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/summary`);
+      expect(summary.status).toBe(200);
+      const body = (await summary.json()) as {
+        spokenSummary: string;
+        truncated: boolean;
+        latestAssistantMessageId: string;
+        totalMessages: number;
+      };
+      expect(body.truncated).toBe(true);
+      expect(body.spokenSummary.length).toBeLessThanOrEqual(1_201);
+      expect(body.spokenSummary).toContain("[REDACTED]");
+      expect(body.latestAssistantMessageId).toBe("message-2");
+      expect(body.totalMessages).toBe(3);
+    });
+  });
+
+  it("serves the archived shell snapshot and dynamic retention controls", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const archived = await authorizedFetch(`${baseUrl}/v3/archived`);
+      expect(archived.status).toBe(200);
+      const body = (await archived.json()) as {
+        snapshotSequence: number;
+        threads: Array<{ id: string; archivedAt: string | null }>;
+      };
+      expect(body.snapshotSequence).toBe(9);
+      expect(body.threads[0]).toMatchObject({
+        id: "thread-archived",
+        archivedAt: "2026-07-20T10:00:00Z",
+      });
+      expect(body.threads[0]).not.toHaveProperty("managed");
+
+      const retain = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/retain`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      expect(retain.status).toBe(200);
+      expect(await retain.json()).toMatchObject({
+        threadId: "thread-1",
+        retained: true,
+        retainedThreadIds: ["thread-1"],
+      });
+
+      const release = await authorizedFetch(`${baseUrl}/v3/threads/thread-1/retain`, {
+        method: "DELETE",
+      });
+      expect(release.status).toBe(200);
+      expect(await release.json()).toMatchObject({ retained: false, retainedThreadIds: [] });
+    });
+  });
+});
+
 const withServer = async (
   test: (context: { baseUrl: string; store: BridgeStore; dispatched: unknown[] }) => Promise<void>,
 ): Promise<void> => {
@@ -860,39 +1102,185 @@ const threadShell = (): OrchestrationThreadShell => ({
   hasActionableProposedPlan: false,
 });
 
-const fakeT3 = (dispatched: unknown[], store: BridgeStore): T3Client => ({
-  start: () => {},
-  stop: async () => {},
-  pair: async () => "token",
-  dispatch: async (command) => {
-    dispatched.push(command);
-    return { sequence: dispatched.length };
-  },
-  fullThreadDiff: async () => ({ diff: "", fromTurnCount: 0, toTurnCount: 1 }),
-  threadOutput: async (threadId) => ({
-    threadId,
-    projectId: "project-1",
-    assistantText: "Prefer the provider-neutral adapter.",
-    createdAt: "2026-07-31T08:01:00Z",
-    truncated: false,
-    freshness: "live",
-    ownership: "t3code",
-  }),
-  refreshThread: async (threadId) => {
-    const shell = store.snapshot().threads.find((thread) => thread.id === threadId);
-    if (shell === undefined) throw new Error("thread_snapshot_unavailable");
-    store.applyThreadItem(threadId, {
-      kind: "snapshot",
-      snapshot: {
-        snapshotSequence: 4,
-        thread: {
-          ...threadShell(),
-          ...shell,
-          activities: [],
-          checkpoints: [],
-        } as unknown as OrchestrationThread,
+const fullThreadFixture = (threadId: string): OrchestrationThread =>
+  ({
+    ...threadShell(),
+    id: threadId as OrchestrationThreadShell["id"],
+    deletedAt: null,
+    messages: [
+      {
+        id: "message-1",
+        role: "user",
+        text: "Bitte analysiere den Importer.",
+        turnId: "turn-1",
+        streaming: false,
+        createdAt: "2026-07-31T08:00:00Z",
+        updatedAt: "2026-07-31T08:00:00Z",
       },
-    });
-  },
-  connected: () => true,
-});
+      {
+        id: "message-2",
+        role: "assistant",
+        text: `Empfehlung: Option B. api_key=super-geheim-123 ${"x".repeat(2_000)}`,
+        turnId: "turn-1",
+        streaming: false,
+        createdAt: "2026-07-31T08:01:00Z",
+        updatedAt: "2026-07-31T08:01:00Z",
+        attachments: [
+          {
+            type: "image",
+            id: "attachment-1",
+            name: "diagramm.png",
+            mimeType: "image/png",
+            sizeBytes: 2_048,
+          },
+        ],
+      },
+      {
+        id: "message-3",
+        role: "user",
+        text: "Und die Risiken?",
+        turnId: "turn-2",
+        streaming: false,
+        createdAt: "2026-07-31T08:02:00Z",
+        updatedAt: "2026-07-31T08:02:00Z",
+      },
+    ],
+    proposedPlans: [
+      {
+        id: "plan-1",
+        turnId: "turn-1",
+        planMarkdown: "# Plan\n1. Refactor importer\n2. password=hunter2 entfernen",
+        implementedAt: null,
+        implementationThreadId: null,
+        createdAt: "2026-07-31T08:01:30Z",
+        updatedAt: "2026-07-31T08:01:30Z",
+      },
+    ],
+    activities: [
+      {
+        id: "activity-1",
+        tone: "tool",
+        kind: "tool.completed",
+        payload: {},
+        createdAt: "2026-07-31T08:00:30Z",
+      },
+      {
+        id: "activity-2",
+        tone: "approval",
+        kind: "approval.requested",
+        payload: { requestId: "request-1", requestKind: "command", requestType: "shell" },
+        createdAt: "2026-07-31T08:00:45Z",
+      },
+      {
+        id: "activity-3",
+        tone: "info",
+        kind: "user-input.requested",
+        payload: {
+          requestId: "request-2",
+          questions: [
+            {
+              id: "q1",
+              header: "Ansatz",
+              question: "Welche Option soll umgesetzt werden?",
+              options: [
+                { label: "Option A", description: "Konservativ" },
+                { label: "Option B", description: "Vollständig" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+        createdAt: "2026-07-31T08:01:15Z",
+      },
+    ],
+    checkpoints: [
+      {
+        turnId: "turn-1",
+        checkpointTurnCount: 1,
+        checkpointRef: "refs/t3/checkpoints/turn-1",
+        status: "ready",
+        files: [{ path: "src/importer.ts", kind: "modified", additions: 12, deletions: 3 }],
+        assistantMessageId: "message-2",
+        completedAt: "2026-07-31T08:01:00Z",
+      },
+    ],
+  }) as unknown as OrchestrationThread;
+
+const fakeT3 = (dispatched: unknown[], store: BridgeStore): T3Client => {
+  const retained = new Set<string>();
+  return {
+    start: () => {},
+    stop: async () => {},
+    pair: async () => "token",
+    dispatch: async (command) => {
+      dispatched.push(command);
+      return { sequence: dispatched.length };
+    },
+    fullThreadDiff: async () => ({ diff: "", fromTurnCount: 0, toTurnCount: 1 }),
+    threadOutput: async (threadId) => ({
+      threadId,
+      projectId: "project-1",
+      assistantText: "Prefer the provider-neutral adapter.",
+      createdAt: "2026-07-31T08:01:00Z",
+      truncated: false,
+      freshness: "live",
+      ownership: "t3code",
+    }),
+    refreshThread: async (threadId) => {
+      const shell = store.snapshot().threads.find((thread) => thread.id === threadId);
+      if (shell === undefined) throw new Error("thread_snapshot_unavailable");
+      store.applyThreadItem(threadId, {
+        kind: "snapshot",
+        snapshot: {
+          snapshotSequence: 4,
+          thread: {
+            ...threadShell(),
+            ...shell,
+            activities: [],
+            checkpoints: [],
+          } as unknown as OrchestrationThread,
+        },
+      });
+    },
+    threadDetail: async (threadId) => {
+      if (threadId === "thread-unknown") throw new Error("thread_snapshot_unavailable");
+      return fullThreadFixture(threadId);
+    },
+    searchThreads: async (query) =>
+      query.toLowerCase().includes("importer")
+        ? [
+            {
+              threadId: "thread-1",
+              projectId: "project-1",
+              source: "assistant",
+              snippet: "Empfehlung: Option B für den Importer. password=abc",
+              messageCreatedAt: "2026-07-31T08:01:00Z",
+            } as unknown as Awaited<ReturnType<T3Client["searchThreads"]>>[number],
+          ]
+        : [],
+    turnDiff: async (_threadId, fromTurnCount, toTurnCount) => ({
+      diff: "diff --git a/src/importer.ts b/src/importer.ts",
+      fromTurnCount,
+      toTurnCount,
+    }),
+    archivedShellSnapshot: async () =>
+      ({
+        snapshotSequence: 9,
+        projects: [projectShell()],
+        threads: [
+          {
+            ...threadShell(),
+            id: "thread-archived" as OrchestrationThreadShell["id"],
+            title: "Übersicht Altprojekt",
+            archivedAt: "2026-07-20T10:00:00Z",
+            updatedAt: "2026-07-20T10:00:00Z",
+          },
+        ],
+        updatedAt: "2026-07-31T09:00:00Z",
+      }) as unknown as Awaited<ReturnType<T3Client["archivedShellSnapshot"]>>,
+    retainThread: (threadId) => retained.add(threadId),
+    releaseThread: (threadId) => retained.delete(threadId),
+    retainedThreadIds: () => [...retained],
+    connected: () => true,
+  };
+};

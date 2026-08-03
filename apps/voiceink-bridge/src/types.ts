@@ -17,6 +17,12 @@ export type BridgeConnectionState = "connecting" | "live" | "stale" | "offline" 
 export interface BridgeProvider {
   readonly instanceId: string;
   readonly driver: string;
+  readonly displayName?: string;
+  readonly version?: string | null;
+  readonly availability?: string;
+  readonly unavailableReason?: string;
+  readonly showInteractionModeToggle?: boolean;
+  readonly requiresNewThreadForModelChange?: boolean;
   readonly enabled: boolean;
   readonly installed: boolean;
   readonly state: "ready" | "warning" | "error" | "disabled";
@@ -24,7 +30,10 @@ export interface BridgeProvider {
   readonly models: ReadonlyArray<{
     readonly slug: string;
     readonly name: string;
+    readonly shortName?: string;
+    readonly isCustom?: boolean;
     readonly isDefault: boolean;
+    readonly capabilities?: unknown;
   }>;
 }
 
@@ -45,6 +54,19 @@ export interface BridgeProject {
   readonly title: string;
   readonly workspaceRoot: string;
   readonly defaultProvider: string | null;
+  readonly defaultModelSelection: {
+    readonly instanceId: string;
+    readonly model: string;
+  } | null;
+  readonly scripts: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly command: string;
+    readonly icon: string;
+    readonly runOnWorktreeCreate: boolean;
+  }>;
+  readonly repositoryIdentity: unknown;
+  readonly createdAt: string;
   readonly updatedAt: string;
   readonly freshness: BridgeFreshness;
 }

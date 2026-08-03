@@ -249,6 +249,10 @@ describe("BridgeStore", () => {
             title: "Project",
             workspaceRoot: "/tmp/project",
             defaultProvider: "codex",
+            defaultModelSelection: null,
+            scripts: [],
+            repositoryIdentity: null,
+            createdAt: "2026-07-30T12:00:00Z",
             updatedAt: "2026-07-30T12:00:00Z",
             freshness: "offline",
           },
@@ -529,5 +533,23 @@ const fakeT3 = (dispatched: unknown[]): T3Client => ({
     ownership: "t3code",
   }),
   refreshThread: async () => {},
+  threadDetail: async () => {
+    throw new Error("thread_snapshot_unavailable");
+  },
+  searchThreads: async () => [],
+  turnDiff: async (_threadId, fromTurnCount, toTurnCount) => ({
+    diff: "",
+    fromTurnCount,
+    toTurnCount,
+  }),
+  archivedShellSnapshot: async () => ({
+    snapshotSequence: 0,
+    projects: [],
+    threads: [],
+    updatedAt: "2026-07-30T12:00:00Z",
+  }),
+  retainThread: () => {},
+  releaseThread: () => {},
+  retainedThreadIds: () => [],
   connected: () => true,
 });

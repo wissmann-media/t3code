@@ -58,6 +58,22 @@ export const normalizeProject = (
     project.defaultModelSelection === null
       ? null
       : providerName(project.defaultModelSelection.instanceId),
+  defaultModelSelection:
+    project.defaultModelSelection === null
+      ? null
+      : {
+          instanceId: project.defaultModelSelection.instanceId,
+          model: project.defaultModelSelection.model,
+        },
+  scripts: project.scripts.map((script) => ({
+    id: script.id,
+    name: script.name,
+    command: script.command,
+    icon: script.icon,
+    runOnWorktreeCreate: script.runOnWorktreeCreate,
+  })),
+  repositoryIdentity: project.repositoryIdentity ?? null,
+  createdAt: project.createdAt,
   updatedAt: project.updatedAt,
   freshness,
 });
@@ -69,7 +85,7 @@ const SECRET_PATTERNS = [
   /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^\s,;]+/gi,
 ] as const;
 
-const redactOutput = (value: string): string => {
+export const redactOutput = (value: string): string => {
   let redacted = Array.from(value)
     .filter((character) => {
       const codePoint = character.codePointAt(0) ?? 0;

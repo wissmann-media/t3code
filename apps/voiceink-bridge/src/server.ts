@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 
 import { buildCapabilityManifest, MANIFEST_SCHEMA_MAJOR } from "./capabilityManifest.ts";
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
+import { handleV3ReadRoute } from "./readRoutes.ts";
 import {
   decodeApprovalResponse,
   decodeCanonicalCommand,
@@ -213,6 +214,16 @@ const routeRequest = async (
     requireCompatibleManifest(request);
     const command = await decodeCanonicalCommand(await readJsonBody(request));
     sendJson(response, 200, await options.commands.previewCanonical(command));
+    return;
+  }
+
+  if (
+    apiVersion === 3 &&
+    (await handleV3ReadRoute(
+      { store: options.store, t3: options.t3 },
+      { method, path, url, response },
+    ))
+  ) {
     return;
   }
 

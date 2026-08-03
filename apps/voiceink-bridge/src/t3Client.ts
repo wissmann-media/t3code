@@ -16,6 +16,9 @@ import {
 import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
+  type OrchestrationShellSnapshot,
+  type OrchestrationThread,
+  type OrchestrationThreadSearchMatch,
   type OrchestrationThreadShell,
   type ServerProvider,
   ThreadId,
@@ -53,6 +56,18 @@ const normalizeProviders = (
   providers.map((provider) => ({
     instanceId: provider.instanceId,
     driver: provider.driver,
+    ...(provider.displayName === undefined ? {} : { displayName: provider.displayName }),
+    version: provider.version,
+    ...(provider.availability === undefined ? {} : { availability: provider.availability }),
+    ...(provider.unavailableReason === undefined
+      ? {}
+      : { unavailableReason: provider.unavailableReason }),
+    ...(provider.showInteractionModeToggle === undefined
+      ? {}
+      : { showInteractionModeToggle: provider.showInteractionModeToggle }),
+    ...(provider.requiresNewThreadForModelChange === undefined
+      ? {}
+      : { requiresNewThreadForModelChange: provider.requiresNewThreadForModelChange }),
     enabled: provider.enabled,
     installed: provider.installed,
     state: provider.status,
@@ -60,7 +75,10 @@ const normalizeProviders = (
     models: provider.models.map((model) => ({
       slug: model.slug,
       name: model.name,
+      ...(model.shortName === undefined ? {} : { shortName: model.shortName }),
+      isCustom: model.isCustom,
       isDefault: model.isDefault === true,
+      ...(model.capabilities === null ? {} : { capabilities: model.capabilities }),
     })),
   }));
 
@@ -79,6 +97,27 @@ export interface T3Client {
   }>;
   readonly threadOutput: (threadId: string) => Promise<BridgeThreadOutput>;
   readonly refreshThread: (threadId: string) => Promise<void>;
+  /** Authoritative full thread detail, fetched on demand and never persisted. */
+  readonly threadDetail: (threadId: string) => Promise<OrchestrationThread>;
+  readonly searchThreads: (
+    query: string,
+    limit?: number,
+  ) => Promise<ReadonlyArray<OrchestrationThreadSearchMatch>>;
+  readonly turnDiff: (
+    threadId: string,
+    fromTurnCount: number,
+    toTurnCount: number,
+    ignoreWhitespace?: boolean,
+  ) => Promise<{
+    readonly diff: string;
+    readonly fromTurnCount: number;
+    readonly toTurnCount: number;
+  }>;
+  readonly archivedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
+  /** Dynamically retain a full thread event stream beyond attention threads. */
+  readonly retainThread: (threadId: string) => void;
+  readonly releaseThread: (threadId: string) => void;
+  readonly retainedThreadIds: () => ReadonlyArray<string>;
   readonly connected: () => boolean;
 }
 
@@ -88,6 +127,11 @@ export class EffectT3Client implements T3Client {
   private readonly httpBaseUrl: string;
   private readonly bearerToken: string;
   private readonly callbacks: T3BridgeCallbacks;
+  /** Thread IDs with a live detail subscription (attention or retained). */
+  private readonly watched = new Set<string>();
+  /** Conversation-relevant thread IDs to keep subscribed across reconnects. */
+  private readonly retained = new Set<string>();
+  private readonly dynamicFibers = new Map<string, Fiber.Fiber<unknown, unknown>>();
 
   constructor(httpBaseUrl: string, bearerToken: string, callbacks: T3BridgeCallbacks) {
     this.httpBaseUrl = httpBaseUrl;
@@ -156,7 +200,8 @@ export class EffectT3Client implements T3Client {
           Effect.forkScoped,
         );
 
-        const watched = new Set<string>();
+        const watched = bridge.watched;
+        watched.clear();
         const watchThreadId = Effect.fn("VoiceInkBridge.watchThreadId")(function* (
           threadId: string,
         ) {
@@ -176,11 +221,11 @@ export class EffectT3Client implements T3Client {
         const watchThread = Effect.fn("VoiceInkBridge.watchThread")(function* (
           thread: OrchestrationThreadShell,
         ) {
-          if (!isAttentionThread(thread)) return;
+          if (!isAttentionThread(thread) && !bridge.retained.has(thread.id)) return;
           yield* watchThreadId(thread.id);
         });
 
-        for (const threadId of attentionThreadIds) {
+        for (const threadId of [...attentionThreadIds, ...bridge.retained]) {
           yield* watchThreadId(threadId);
         }
 
@@ -210,6 +255,7 @@ export class EffectT3Client implements T3Client {
       Effect.ensuring(
         Effect.sync(() => {
           bridge.activeClient = null;
+          bridge.watched.clear();
         }),
       ),
       Effect.tapError((error) =>
@@ -279,6 +325,95 @@ export class EffectT3Client implements T3Client {
     if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
     this.callbacks.onThreadItem(threadId, item);
     return normalizeThreadOutput(item.snapshot.thread);
+  }
+
+  async threadDetail(threadId: string): Promise<OrchestrationThread> {
+    const item = await this.fetchThreadSnapshot(threadId);
+    if (item.kind !== "snapshot") throw new Error("thread_snapshot_unavailable");
+    this.callbacks.onThreadItem(threadId, item);
+    return item.snapshot.thread;
+  }
+
+  async searchThreads(
+    query: string,
+    limit?: number,
+  ): Promise<ReadonlyArray<OrchestrationThreadSearchMatch>> {
+    const active = this.activeClient;
+    if (active === null) throw new Error("t3_unavailable");
+    const result = await runtime.runPromise(
+      active[ORCHESTRATION_WS_METHODS.searchThreads]({
+        query,
+        ...(limit === undefined ? {} : { limit }),
+      }),
+    );
+    return result.matches;
+  }
+
+  async turnDiff(
+    threadId: string,
+    fromTurnCount: number,
+    toTurnCount: number,
+    ignoreWhitespace?: boolean,
+  ): Promise<{
+    readonly diff: string;
+    readonly fromTurnCount: number;
+    readonly toTurnCount: number;
+  }> {
+    const active = this.activeClient;
+    if (active === null) throw new Error("t3_unavailable");
+    return runtime.runPromise(
+      active[ORCHESTRATION_WS_METHODS.getTurnDiff]({
+        threadId: ThreadId.make(threadId),
+        fromTurnCount,
+        toTurnCount,
+        ...(ignoreWhitespace === undefined ? {} : { ignoreWhitespace }),
+      }),
+    );
+  }
+
+  async archivedShellSnapshot(): Promise<OrchestrationShellSnapshot> {
+    const active = this.activeClient;
+    if (active === null) throw new Error("t3_unavailable");
+    return runtime.runPromise(active[ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]({}));
+  }
+
+  retainThread(threadId: string): void {
+    this.retained.add(threadId);
+    const active = this.activeClient;
+    if (active === null || this.watched.has(threadId)) return;
+    this.watched.add(threadId);
+    const bridge = this;
+    const fiber = runtime.runFork(
+      active[ORCHESTRATION_WS_METHODS.subscribeThread]({
+        threadId: ThreadId.make(threadId),
+        requestCompletionMarker: true,
+      }).pipe(
+        Stream.runForEach((item) =>
+          Effect.sync(() => bridge.callbacks.onThreadItem(threadId, item)),
+        ),
+        Effect.catch(() => Effect.void),
+        Effect.ensuring(
+          Effect.sync(() => {
+            bridge.watched.delete(threadId);
+            bridge.dynamicFibers.delete(threadId);
+          }),
+        ),
+      ),
+    );
+    this.dynamicFibers.set(threadId, fiber);
+  }
+
+  releaseThread(threadId: string): void {
+    this.retained.delete(threadId);
+    const fiber = this.dynamicFibers.get(threadId);
+    if (fiber !== undefined) {
+      this.dynamicFibers.delete(threadId);
+      runtime.runFork(Fiber.interrupt(fiber));
+    }
+  }
+
+  retainedThreadIds(): ReadonlyArray<string> {
+    return [...this.retained];
   }
 
   async refreshThread(threadId: string): Promise<void> {

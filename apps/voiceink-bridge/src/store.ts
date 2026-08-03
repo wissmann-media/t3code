@@ -499,7 +499,7 @@ const applyThreadDetailEvent = (
   };
 };
 
-const minimizedActivitySummary = (
+export const minimizedActivitySummary = (
   tone: BridgeThreadDetail["recentActivity"][number]["tone"],
 ): string => {
   switch (tone) {
@@ -535,13 +535,13 @@ const minimizePersistedState = (state: PersistedBridgeState): PersistedBridgeSta
   },
 });
 
-const requestIdFromPayload = (payload: unknown): string | null => {
+export const requestIdFromPayload = (payload: unknown): string | null => {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) return null;
   const requestId = payload.requestId;
   return typeof requestId === "string" && requestId.length <= 240 ? requestId : null;
 };
 
-const requestDetailsFromActivity = (
+export const requestDetailsFromActivity = (
   payload: unknown,
   kind: string,
 ): BridgeActivityRequest | undefined => {
