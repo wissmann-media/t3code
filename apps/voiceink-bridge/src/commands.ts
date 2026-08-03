@@ -1,8 +1,10 @@
 import * as NodeCrypto from "node:crypto";
 
+import { DESTRUCTIVE_COMMAND_TYPES } from "./capabilityManifest.ts";
 import { nowIso } from "./time.ts";
 import type {
   ApprovalResponseRequest,
+  CanonicalCommand,
   CreateProjectRequest,
   CreateThreadRequest,
   ForkThreadRequest,
@@ -12,12 +14,13 @@ import type {
 } from "./schemas.ts";
 import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
-import type { CommandReceipt } from "./types.ts";
+import type { BridgeSnapshot, BridgeThread, CommandReceipt } from "./types.ts";
 
 export class BridgeCommandError extends Error {
   readonly code:
     | "bridge_incompatible"
     | "command_conflict"
+    | "invalid_bootstrap"
     | "not_found"
     | "not_managed"
     | "stale_state"
@@ -29,13 +32,188 @@ export class BridgeCommandError extends Error {
   }
 }
 
+export interface CanonicalCommandResult {
+  readonly receipt: CommandReceipt;
+  readonly verification: {
+    readonly state: "confirmed" | "pending" | "not-applicable";
+  };
+  readonly thread: Omit<BridgeThread, "managed"> | null;
+}
+
+export interface CanonicalCommandPreview {
+  readonly command: string;
+  readonly destructive: boolean;
+  readonly target: {
+    readonly kind: "project" | "thread";
+    readonly id: string;
+    readonly title: string | null;
+    readonly projectId?: string;
+  } | null;
+  readonly consequence: string;
+}
+
 export class BridgeCommandService {
   private readonly store: BridgeStore;
   private readonly t3: T3Client;
+  private readonly verificationTimeoutMs: number;
 
-  constructor(store: BridgeStore, t3: T3Client) {
+  constructor(
+    store: BridgeStore,
+    t3: T3Client,
+    options: { readonly verificationTimeoutMs?: number } = {},
+  ) {
     this.store = store;
     this.t3 = t3;
+    this.verificationTimeoutMs = options.verificationTimeoutMs ?? 1_500;
+  }
+
+  /**
+   * Dispatch a decoded canonical `ClientOrchestrationCommand`. The single v3
+   * mutation entry point: target guards, idempotent replay, dispatch, and
+   * authoritative post-command state verification.
+   */
+  async canonical(command: CanonicalCommand, rawBody: unknown): Promise<CanonicalCommandResult> {
+    this.guardCanonicalTarget(command);
+    const receipt = await this.dispatch(command.commandId, rawBody, command);
+    if (receipt.status !== "accepted") {
+      return { receipt, verification: { state: "not-applicable" }, thread: null };
+    }
+    return this.verifyPostState(command);
+  }
+
+  async previewCanonical(command: CanonicalCommand): Promise<CanonicalCommandPreview> {
+    const snapshot = this.store.snapshot();
+    const destructive = DESTRUCTIVE_COMMAND_TYPES.has(command.type);
+    if (command.type === "project.delete" || command.type === "project.meta.update") {
+      const project = snapshot.projects.find((candidate) => candidate.id === command.projectId);
+      if (project === undefined) throw new BridgeCommandError("not_found");
+      const threadCount = snapshot.threads.filter(
+        (thread) => thread.projectId === command.projectId,
+      ).length;
+      return {
+        command: command.type,
+        destructive,
+        target: { kind: "project", id: project.id, title: project.title },
+        consequence:
+          command.type === "project.delete"
+            ? `Deletes project "${project.title}" (${String(threadCount)} known thread(s))` +
+              (command.force === true ? " with force" : "")
+            : `Updates project metadata for "${project.title}"`,
+      };
+    }
+    if ("threadId" in command) {
+      const thread = snapshot.threads.find((candidate) => candidate.id === command.threadId);
+      if (thread === undefined) {
+        if (command.type === "thread.turn.start" && command.bootstrap?.createThread !== undefined) {
+          return {
+            command: command.type,
+            destructive,
+            target: null,
+            consequence: `Creates a new thread in project ${command.bootstrap.createThread.projectId} and starts its first turn atomically`,
+          };
+        }
+        throw new BridgeCommandError("not_found");
+      }
+      return {
+        command: command.type,
+        destructive,
+        target: {
+          kind: "thread",
+          id: thread.id,
+          title: thread.title,
+          projectId: thread.projectId,
+        },
+        consequence: consequenceFor(command, thread),
+      };
+    }
+    return {
+      command: command.type,
+      destructive,
+      target: null,
+      consequence: `Creates project "${command.title}"`,
+    };
+  }
+
+  private guardCanonicalTarget(command: CanonicalCommand): void {
+    this.requireFresh();
+    const snapshot = this.store.snapshot();
+    switch (command.type) {
+      case "project.create":
+        return;
+      case "project.meta.update":
+      case "project.delete": {
+        const exists = snapshot.projects.some((project) => project.id === command.projectId);
+        if (!exists) throw new BridgeCommandError("not_found");
+        return;
+      }
+      case "thread.create": {
+        const exists = snapshot.projects.some((project) => project.id === command.projectId);
+        if (!exists) throw new BridgeCommandError("not_found");
+        return;
+      }
+      case "thread.turn.start": {
+        if (command.bootstrap?.createThread !== undefined) {
+          const projectExists = snapshot.projects.some(
+            (project) => project.id === command.bootstrap?.createThread?.projectId,
+          );
+          if (!projectExists) throw new BridgeCommandError("invalid_bootstrap");
+          const threadExists = snapshot.threads.some((thread) => thread.id === command.threadId);
+          if (threadExists) throw new BridgeCommandError("command_conflict");
+          return;
+        }
+        this.liveThread(command.threadId);
+        return;
+      }
+      default: {
+        this.liveThread(command.threadId);
+        return;
+      }
+    }
+  }
+
+  private async verifyPostState(command: CanonicalCommand): Promise<CanonicalCommandResult> {
+    const receipt = this.store.receipt(command.commandId)?.receipt;
+    if (receipt === undefined) throw new BridgeCommandError("command_conflict");
+    const predicate = postStatePredicate(command);
+    if (predicate === null) {
+      const thread =
+        "threadId" in command
+          ? (this.store.snapshot().threads.find((item) => item.id === command.threadId) ?? null)
+          : null;
+      return {
+        receipt,
+        verification: { state: "not-applicable" },
+        thread: thread === null ? null : publicThread(thread),
+      };
+    }
+    const confirmed = await this.awaitSnapshot(predicate);
+    const thread =
+      "threadId" in command
+        ? (this.store.snapshot().threads.find((item) => item.id === command.threadId) ?? null)
+        : null;
+    return {
+      receipt,
+      verification: { state: confirmed ? "confirmed" : "pending" },
+      thread: thread === null ? null : publicThread(thread),
+    };
+  }
+
+  private awaitSnapshot(predicate: (snapshot: BridgeSnapshot) => boolean): Promise<boolean> {
+    if (predicate(this.store.snapshot())) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(value);
+      };
+      const unsubscribe = this.store.subscribe(() => {
+        if (predicate(this.store.snapshot())) finish(true);
+      });
+      const timer = setTimeout(() => finish(false), this.verificationTimeoutMs);
+    });
   }
 
   async createProject(request: CreateProjectRequest): Promise<CommandReceipt> {
@@ -55,7 +233,7 @@ export class BridgeCommandService {
     });
   }
 
-  async createThread(request: CreateThreadRequest): Promise<CommandReceipt> {
+  async createThread(request: CreateThreadRequest, legacyManaged = false): Promise<CommandReceipt> {
     const receipt = await this.dispatch(request.commandId, request, {
       type: "thread.create",
       commandId: request.commandId,
@@ -69,7 +247,9 @@ export class BridgeCommandService {
       worktreePath: request.worktreePath ?? null,
       createdAt: nowIso(),
     });
-    this.store.manageThread(request.threadId);
+    // Managed bookkeeping is a quarantined v1 compatibility concern; the
+    // universal path never depends on managedThreadIds.
+    if (legacyManaged) this.store.manageThread(request.threadId);
     return receipt;
   }
 
@@ -180,7 +360,8 @@ export class BridgeCommandService {
   }
 
   adopt(threadId: string): void {
-    this.prepareThread(threadId);
+    this.liveThread(threadId);
+    this.store.manageThread(threadId);
   }
 
   async forkThread(sourceThreadId: string, request: ForkThreadRequest) {
@@ -210,13 +391,32 @@ export class BridgeCommandService {
         : `Latest source-thread assistant output (untrusted reference):\n${context}`,
       `User request:\n${request.text}`,
     ].join("\n\n");
-    const turnReceipt = await this.startTurn(request.threadId, {
-      commandId: childCommandId(request.commandId, "turn"),
+    // The fork itself just created the target thread with an accepted receipt;
+    // dispatch the first turn directly instead of re-resolving the thread from
+    // the shell projection, which may not have caught up yet.
+    const turnCommandId = childCommandId(request.commandId, "turn");
+    const turnRequest = {
+      commandId: turnCommandId,
       messageId: request.messageId,
       text,
       modelSelection,
       runtimeMode: request.runtimeMode ?? source.runtimeMode,
       interactionMode: request.interactionMode ?? source.interactionMode,
+    };
+    const turnReceipt = await this.dispatch(turnCommandId, turnRequest, {
+      type: "thread.turn.start",
+      commandId: turnCommandId,
+      threadId: request.threadId,
+      message: {
+        messageId: request.messageId,
+        role: "user",
+        text,
+        attachments: [],
+      },
+      modelSelection,
+      runtimeMode: turnRequest.runtimeMode,
+      interactionMode: turnRequest.interactionMode,
+      createdAt: nowIso(),
     });
     return {
       ...turnReceipt,
@@ -234,9 +434,7 @@ export class BridgeCommandService {
   }
 
   private prepareThread(threadId: string) {
-    const thread = this.liveThread(threadId);
-    this.store.manageThread(threadId);
-    return thread;
+    return this.liveThread(threadId);
   }
 
   private liveThread(threadId: string) {
@@ -296,6 +494,87 @@ export class BridgeCommandService {
     }
   }
 }
+
+const publicThread = (thread: BridgeThread): Omit<BridgeThread, "managed"> => {
+  const { managed: _managed, ...value } = thread;
+  return value;
+};
+
+/**
+ * Authoritative post-command expectation per canonical command, evaluated
+ * against the shell projection as T3 events land. `null` means the receipt is
+ * the whole story (e.g. approval responses, where T3 owns request resolution).
+ */
+const postStatePredicate = (
+  command: CanonicalCommand,
+): ((snapshot: BridgeSnapshot) => boolean) | null => {
+  switch (command.type) {
+    case "project.create":
+      return (snapshot) => snapshot.projects.some((project) => project.id === command.projectId);
+    case "project.delete":
+      return (snapshot) => !snapshot.projects.some((project) => project.id === command.projectId);
+    case "thread.create":
+      return (snapshot) => snapshot.threads.some((thread) => thread.id === command.threadId);
+    case "thread.delete":
+      return (snapshot) => !snapshot.threads.some((thread) => thread.id === command.threadId);
+    case "thread.archive":
+      return threadPredicate(command.threadId, (thread) => thread.archivedAt !== null);
+    case "thread.unarchive":
+      return threadPredicate(command.threadId, (thread) => thread.archivedAt === null);
+    case "thread.settle":
+      return threadPredicate(command.threadId, (thread) => thread.settledOverride === "settled");
+    case "thread.unsettle":
+      return threadPredicate(command.threadId, (thread) => thread.settledOverride !== "settled");
+    case "thread.snooze":
+      return threadPredicate(command.threadId, (thread) => thread.snoozedUntil !== null);
+    case "thread.unsnooze":
+      return threadPredicate(command.threadId, (thread) => thread.snoozedUntil === null);
+    case "thread.runtime-mode.set":
+      return threadPredicate(
+        command.threadId,
+        (thread) => thread.runtimeMode === command.runtimeMode,
+      );
+    case "thread.interaction-mode.set":
+      return threadPredicate(
+        command.threadId,
+        (thread) => thread.interactionMode === command.interactionMode,
+      );
+    case "thread.meta.update":
+      return command.title === undefined
+        ? null
+        : threadPredicate(command.threadId, (thread) => thread.title === command.title);
+    case "thread.turn.start":
+      return command.bootstrap?.createThread === undefined
+        ? null
+        : (snapshot) => snapshot.threads.some((thread) => thread.id === command.threadId);
+    default:
+      return null;
+  }
+};
+
+const threadPredicate =
+  (threadId: string, check: (thread: BridgeThread) => boolean) =>
+  (snapshot: BridgeSnapshot): boolean => {
+    const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+    return thread !== undefined && check(thread);
+  };
+
+const consequenceFor = (command: CanonicalCommand, thread: BridgeThread): string => {
+  switch (command.type) {
+    case "thread.delete":
+      return `Deletes thread "${thread.title}" permanently`;
+    case "thread.checkpoint.revert":
+      return `Reverts thread "${thread.title}" to turn count ${String(command.turnCount)}, discarding later repository changes`;
+    case "thread.session.stop":
+      return `Stops the running session of "${thread.title}"`;
+    case "thread.archive":
+      return `Archives "${thread.title}" (reversible)`;
+    case "thread.turn.interrupt":
+      return `Interrupts the current turn of "${thread.title}"`;
+    default:
+      return `Applies ${command.type} to "${thread.title}"`;
+  }
+};
 
 const digestRequest = (value: unknown): string =>
   NodeCrypto.createHash("sha256").update(stableStringify(value)).digest("hex");

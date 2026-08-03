@@ -7,7 +7,8 @@ import type {
 
 export const LEGACY_BRIDGE_API_VERSION = 1;
 export const BRIDGE_API_VERSION = 2;
-export const BRIDGE_VERSION = "0.2.0";
+export const BRIDGE_API_VERSION_V3 = 3;
+export const BRIDGE_VERSION = "0.3.0";
 export const STATUS_SCHEMA_VERSION = 1;
 
 export type BridgeFreshness = "live" | "recent" | "stale" | "offline";
@@ -77,6 +78,11 @@ export interface BridgeThread {
   readonly managed: boolean;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  /** Lifecycle state mirrored from the authoritative T3 shell. */
+  readonly archivedAt: string | null;
+  readonly settledOverride: "settled" | "active" | null;
+  readonly snoozedUntil: string | null;
+  readonly hasActionableProposedPlan: boolean;
   readonly forkedFromThreadId?: string;
   readonly forkMode?: "native" | "contextual";
   readonly capabilities: ReadonlyArray<

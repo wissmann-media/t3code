@@ -153,6 +153,10 @@ export const normalizeThread = (
     managed,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    archivedAt: thread.archivedAt,
+    settledOverride: thread.settledOverride,
+    snoozedUntil: thread.snoozedUntil ?? null,
+    hasActionableProposedPlan: thread.hasActionableProposedPlan,
     capabilities: [
       "read",
       "output",

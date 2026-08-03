@@ -28,7 +28,7 @@ describe("Bridge HTTP routes", () => {
         forkModes: string[];
       };
       expect(body.apiVersion).toBe(2);
-      expect(body.bridgeVersion).toBe("0.2.0");
+      expect(body.bridgeVersion).toBe("0.3.0");
       expect(body.capabilities).toContain("thread.turn.start");
       expect(body.capabilities).toContain("thread.fork.contextual");
       expect(body.capabilities).not.toContain("thread.adopt");
@@ -101,7 +101,7 @@ describe("Bridge HTTP routes", () => {
     });
   });
 
-  it("keeps v1 managed gating but prepares any live T3 thread transparently in v2", async () => {
+  it("keeps v1 managed gating while v2 operates without managed bookkeeping", async () => {
     await withServer(async ({ baseUrl, dispatched, store }) => {
       const request = {
         commandId: "turn-command",
@@ -121,7 +121,9 @@ describe("Bridge HTTP routes", () => {
         body: JSON.stringify(request),
       });
       expect(response.status).toBe(202);
-      expect(store.isManagedThread("thread-1")).toBe(true);
+      // The universal path never records managed state; managedThreadIds is a
+      // quarantined v1 compatibility concern.
+      expect(store.isManagedThread("thread-1")).toBe(false);
       expect(dispatched).toHaveLength(2);
       expect(dispatched[0]).toMatchObject({
         type: "thread.runtime-mode.set",
@@ -404,6 +406,340 @@ describe("Bridge HTTP routes", () => {
   });
 });
 
+describe("Bridge v3 canonical surface", () => {
+  const iso = "2026-08-03T10:00:00Z";
+  const model = { instanceId: "codex-default", model: "gpt-test" };
+
+  it("serves the generated capability manifest on /v3/capabilities", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const response = await authorizedFetch(`${baseUrl}/v3/capabilities`);
+      expect(response.status).toBe(200);
+      const manifest = (await response.json()) as {
+        manifestSchemaVersion: string;
+        apiVersion: number;
+        commands: Array<{ command: string; available: boolean }>;
+        queries: Array<{ query: string }>;
+      };
+      expect(manifest.manifestSchemaVersion).toBe("3.0.0");
+      expect(manifest.apiVersion).toBe(3);
+      expect(manifest.commands).toHaveLength(20);
+      expect(manifest.commands.every((command) => command.available)).toBe(true);
+    });
+  });
+
+  it("dispatches every canonical command variant through /v3/commands", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const commands: Array<Record<string, unknown>> = [
+        {
+          type: "project.create",
+          commandId: "c01",
+          projectId: "project-new",
+          title: "New",
+          workspaceRoot: "/tmp/new",
+          createdAt: iso,
+        },
+        { type: "project.meta.update", commandId: "c02", projectId: "project-1", title: "Renamed" },
+        { type: "project.delete", commandId: "c03", projectId: "project-1" },
+        {
+          type: "thread.create",
+          commandId: "c04",
+          threadId: "thread-new",
+          projectId: "project-1",
+          title: "T",
+          modelSelection: model,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: iso,
+        },
+        { type: "thread.delete", commandId: "c05", threadId: "thread-1" },
+        { type: "thread.archive", commandId: "c06", threadId: "thread-1" },
+        { type: "thread.unarchive", commandId: "c07", threadId: "thread-1" },
+        { type: "thread.settle", commandId: "c08", threadId: "thread-1" },
+        { type: "thread.unsettle", commandId: "c09", threadId: "thread-1", reason: "user" },
+        { type: "thread.snooze", commandId: "c10", threadId: "thread-1", snoozedUntil: iso },
+        { type: "thread.unsnooze", commandId: "c11", threadId: "thread-1", reason: "user" },
+        {
+          type: "thread.meta.update",
+          commandId: "c12",
+          threadId: "thread-1",
+          title: "Better title",
+          expectedBranch: "main",
+        },
+        {
+          type: "thread.runtime-mode.set",
+          commandId: "c13",
+          threadId: "thread-1",
+          runtimeMode: "full-access",
+          createdAt: iso,
+        },
+        {
+          type: "thread.interaction-mode.set",
+          commandId: "c14",
+          threadId: "thread-1",
+          interactionMode: "plan",
+          createdAt: iso,
+        },
+        {
+          type: "thread.turn.start",
+          commandId: "c15",
+          threadId: "thread-1",
+          message: { messageId: "m15", role: "user", text: "Weiter bitte.", attachments: [] },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          titleSeed: "Weiter",
+          createdAt: iso,
+        },
+        { type: "thread.turn.interrupt", commandId: "c16", threadId: "thread-1", createdAt: iso },
+        {
+          type: "thread.approval.respond",
+          commandId: "c17",
+          threadId: "thread-1",
+          requestId: "req-1",
+          decision: "accept",
+          createdAt: iso,
+        },
+        {
+          type: "thread.user-input.respond",
+          commandId: "c18",
+          threadId: "thread-1",
+          requestId: "req-2",
+          answers: { choice: "B" },
+          createdAt: iso,
+        },
+        {
+          type: "thread.checkpoint.revert",
+          commandId: "c19",
+          threadId: "thread-1",
+          turnCount: 1,
+          createdAt: iso,
+        },
+        { type: "thread.session.stop", commandId: "c20", threadId: "thread-1", createdAt: iso },
+      ];
+      for (const command of commands) {
+        const response = await authorizedFetch(`${baseUrl}/v3/commands`, {
+          method: "POST",
+          body: JSON.stringify(command),
+        });
+        expect(response.status, String(command.type)).toBe(202);
+        const body = (await response.json()) as {
+          receipt: { status: string; commandId: string };
+          verification: { state: string };
+        };
+        expect(body.receipt.status, String(command.type)).toBe("accepted");
+        expect(["confirmed", "pending", "not-applicable"]).toContain(body.verification.state);
+      }
+      expect(dispatched.map((value) => (value as { type: string }).type)).toEqual(
+        commands.map((command) => command.type),
+      );
+    });
+  });
+
+  it("starts an atomic bootstrap turn with worktree preparation", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const response = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.turn.start",
+          commandId: "boot-1",
+          threadId: "thread-boot",
+          message: { messageId: "m-boot", role: "user", text: "Setz das um.", attachments: [] },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          bootstrap: {
+            createThread: {
+              projectId: "project-1",
+              title: "Bootstrap session",
+              modelSelection: model,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: iso,
+            },
+            prepareWorktree: { projectCwd: "/tmp/project", baseBranch: "main" },
+            runSetupScript: true,
+          },
+          createdAt: iso,
+        }),
+      });
+      expect(response.status).toBe(202);
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({
+        type: "thread.turn.start",
+        threadId: "thread-boot",
+        bootstrap: { runSetupScript: true },
+      });
+
+      const unknownProject = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.turn.start",
+          commandId: "boot-2",
+          threadId: "thread-boot-2",
+          message: { messageId: "m-boot-2", role: "user", text: "x", attachments: [] },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          bootstrap: {
+            createThread: {
+              projectId: "project-missing",
+              title: "Nope",
+              modelSelection: model,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: iso,
+            },
+          },
+          createdAt: iso,
+        }),
+      });
+      expect(unknownProject.status).toBe(422);
+      expect(await unknownProject.json()).toEqual({ error: "invalid_bootstrap" });
+    });
+  });
+
+  it("replays idempotently and rejects conflicting reuse of a command id", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const command = {
+        type: "thread.archive",
+        commandId: "replay-1",
+        threadId: "thread-1",
+      };
+      const first = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify(command),
+      });
+      expect(first.status).toBe(202);
+      const second = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify(command),
+      });
+      expect(second.status).toBe(202);
+      expect(dispatched).toHaveLength(1);
+
+      const conflicting = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({ ...command, type: "thread.settle" }),
+      });
+      expect(conflicting.status).toBe(409);
+      expect(await conflicting.json()).toEqual({ error: "command_conflict" });
+    });
+  });
+
+  it("refuses server-internal commands, unknown fields, and missing targets", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const internal = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.session.set",
+          commandId: "evil-1",
+          threadId: "thread-1",
+          session: null,
+        }),
+      });
+      expect(internal.status).toBe(422);
+
+      const excess = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.archive",
+          commandId: "excess-1",
+          threadId: "thread-1",
+          rpcMethod: "orchestration.anything",
+        }),
+      });
+      expect(excess.status).toBe(422);
+
+      const missing = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.archive",
+          commandId: "missing-1",
+          threadId: "thread-unknown",
+        }),
+      });
+      expect(missing.status).toBe(404);
+      expect(dispatched).toHaveLength(0);
+    });
+  });
+
+  it("verifies authoritative post-command state when the projection confirms it", async () => {
+    await withServer(async ({ baseUrl }) => {
+      // thread-1 is not archived; unarchive is already authoritatively true.
+      const confirmed = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.unarchive",
+          commandId: "verify-1",
+          threadId: "thread-1",
+        }),
+      });
+      expect(confirmed.status).toBe(202);
+      expect(
+        ((await confirmed.json()) as { verification: { state: string } }).verification.state,
+      ).toBe("confirmed");
+
+      // Archive cannot be confirmed against the static fake projection.
+      const pending = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "thread.archive",
+          commandId: "verify-2",
+          threadId: "thread-1",
+        }),
+      });
+      expect(pending.status).toBe(202);
+      expect(
+        ((await pending.json()) as { verification: { state: string } }).verification.state,
+      ).toBe("pending");
+    });
+  });
+
+  it("previews destructive commands with exact target and consequence", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const preview = await authorizedFetch(`${baseUrl}/v3/commands/preview`, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "project.delete",
+          commandId: "p-del",
+          projectId: "project-1",
+          force: true,
+        }),
+      });
+      expect(preview.status).toBe(200);
+      const body = (await preview.json()) as {
+        destructive: boolean;
+        target: { kind: string; id: string; title: string };
+        consequence: string;
+      };
+      expect(body.destructive).toBe(true);
+      expect(body.target).toMatchObject({ kind: "project", id: "project-1", title: "Project" });
+      expect(body.consequence).toContain("with force");
+      expect(dispatched).toHaveLength(0);
+    });
+  });
+
+  it("fails closed on an incompatible manifest major version", async () => {
+    await withServer(async ({ baseUrl, dispatched }) => {
+      const response = await authorizedFetch(`${baseUrl}/v3/commands`, {
+        method: "POST",
+        headers: { "x-manifest-major": "2" },
+        body: JSON.stringify({
+          type: "thread.archive",
+          commandId: "old-major",
+          threadId: "thread-1",
+        }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "bridge_incompatible" });
+      expect(dispatched).toHaveLength(0);
+    });
+  });
+});
+
 const withServer = async (
   test: (context: { baseUrl: string; store: BridgeStore; dispatched: unknown[] }) => Promise<void>,
 ): Promise<void> => {
@@ -412,7 +748,7 @@ const withServer = async (
   const t3 = fakeT3(dispatched, store);
   const server = createBridgeServer({
     store,
-    commands: new BridgeCommandService(store, t3),
+    commands: new BridgeCommandService(store, t3, { verificationTimeoutMs: 25 }),
     t3,
     bearerToken,
     pairing: new BridgePairingSession(bearerToken),

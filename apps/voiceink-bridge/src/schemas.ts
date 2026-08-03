@@ -1,4 +1,4 @@
-import { ProviderOptionSelections } from "@t3tools/contracts";
+import { ClientOrchestrationCommand, ProviderOptionSelections } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const Identifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(240));
@@ -109,3 +109,13 @@ export const decodeUserInputResponse = Schema.decodeUnknownPromise(UserInputResp
 export const decodePairing = Schema.decodeUnknownPromise(PairingRequest, {
   onExcessProperty: "error",
 });
+
+/**
+ * The complete canonical client command union, decoded strictly. Anything
+ * outside the union — including server-internal commands — fails decoding and
+ * never reaches dispatch.
+ */
+export const decodeCanonicalCommand = Schema.decodeUnknownPromise(ClientOrchestrationCommand, {
+  onExcessProperty: "error",
+});
+export type CanonicalCommand = ClientOrchestrationCommand;

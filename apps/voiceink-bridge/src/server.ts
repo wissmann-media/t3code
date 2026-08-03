@@ -4,9 +4,11 @@ import * as NodeTimers from "node:timers";
 import * as NodeURL from "node:url";
 import * as Schema from "effect/Schema";
 
+import { buildCapabilityManifest, MANIFEST_SCHEMA_MAJOR } from "./capabilityManifest.ts";
 import { BridgeCommandError, BridgeCommandService } from "./commands.ts";
 import {
   decodeApprovalResponse,
+  decodeCanonicalCommand,
   decodeCreateProject,
   decodeCreateThread,
   decodeForkThread,
@@ -19,12 +21,20 @@ import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
 import {
   BRIDGE_API_VERSION,
+  BRIDGE_API_VERSION_V3,
   BRIDGE_VERSION,
   LEGACY_BRIDGE_API_VERSION,
   STATUS_SCHEMA_VERSION,
   type BridgeStatusEvent,
   type BridgeThread,
 } from "./types.ts";
+
+const reportedApiVersion = (apiVersion: number): number =>
+  apiVersion === 3
+    ? BRIDGE_API_VERSION_V3
+    : apiVersion === 2
+      ? BRIDGE_API_VERSION
+      : LEGACY_BRIDGE_API_VERSION;
 import { nowEpochMillis } from "./time.ts";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -71,9 +81,13 @@ export const createBridgeServer = (options: {
         const status =
           error.code === "not_found"
             ? 404
-            : error.code === "not_managed" || error.code === "command_conflict"
-              ? 409
-              : 503;
+            : error.code === "invalid_bootstrap"
+              ? 422
+              : error.code === "not_managed" ||
+                  error.code === "command_conflict" ||
+                  error.code === "bridge_incompatible"
+                ? 409
+                : 503;
         sendJson(response, status, { error: error.code });
         return;
       }
@@ -143,14 +157,21 @@ const routeRequest = async (
 ): Promise<void> => {
   const method = request.method ?? "GET";
   const url = new NodeURL.URL(request.url ?? "/", "http://127.0.0.1");
-  const apiVersion = url.pathname === "/v2" || url.pathname.startsWith("/v2/") ? 2 : 1;
+  const apiVersion =
+    url.pathname === "/v3" || url.pathname.startsWith("/v3/")
+      ? 3
+      : url.pathname === "/v2" || url.pathname.startsWith("/v2/")
+        ? 2
+        : 1;
   const path =
-    apiVersion === 2 ? `/v1${url.pathname === "/v2" ? "" : url.pathname.slice(3)}` : url.pathname;
+    apiVersion >= 2
+      ? `/v1${url.pathname === `/v${apiVersion}` ? "" : url.pathname.slice(3)}`
+      : url.pathname;
 
   if (method === "GET" && path === "/v1/health") {
     const environment = options.store.snapshot().environment;
     sendJson(response, 200, {
-      apiVersion: apiVersion === 2 ? BRIDGE_API_VERSION : LEGACY_BRIDGE_API_VERSION,
+      apiVersion: reportedApiVersion(apiVersion),
       bridgeVersion: BRIDGE_VERSION,
       status: options.t3.connected() ? "live" : environment === null ? "starting" : "degraded",
       t3Connection: environment?.connection ?? "offline",
@@ -175,9 +196,29 @@ const routeRequest = async (
     return;
   }
 
+  if (apiVersion === 3 && method === "GET" && path === "/v1/capabilities") {
+    sendJson(response, 200, buildCapabilityManifest(options.store));
+    return;
+  }
+
+  if (apiVersion === 3 && method === "POST" && path === "/v1/commands") {
+    requireCompatibleManifest(request);
+    const rawBody = await readJsonBody(request);
+    const command = await decodeCanonicalCommand(rawBody);
+    sendJson(response, 202, await options.commands.canonical(command, rawBody));
+    return;
+  }
+
+  if (apiVersion === 3 && method === "POST" && path === "/v1/commands/preview") {
+    requireCompatibleManifest(request);
+    const command = await decodeCanonicalCommand(await readJsonBody(request));
+    sendJson(response, 200, await options.commands.previewCanonical(command));
+    return;
+  }
+
   if (method === "GET" && path === "/v1/capabilities") {
     sendJson(response, 200, {
-      apiVersion: apiVersion === 2 ? BRIDGE_API_VERSION : LEGACY_BRIDGE_API_VERSION,
+      apiVersion: reportedApiVersion(apiVersion),
       statusSchemaVersion: STATUS_SCHEMA_VERSION,
       bridgeVersion: BRIDGE_VERSION,
       compatible: true,
@@ -306,7 +347,7 @@ const routeRequest = async (
     return;
   }
 
-  if (apiVersion === 2 && method === "GET" && threadActivityMatch?.[1] !== undefined) {
+  if (apiVersion >= 2 && method === "GET" && threadActivityMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(threadActivityMatch[1]);
     const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
     if (thread === undefined) {
@@ -333,7 +374,7 @@ const routeRequest = async (
       sendJson(response, 404, { error: "not_found" });
     } else {
       sendJson(response, 200, {
-        thread: apiVersion === 2 ? publicThread(thread) : thread,
+        thread: apiVersion >= 2 ? publicThread(thread) : thread,
         detail: snapshot.details[threadId] ?? null,
       });
     }
@@ -344,7 +385,7 @@ const routeRequest = async (
   if (method === "GET" && diffMatch?.[1] !== undefined) {
     const threadId = decodeURIComponent(diffMatch[1]);
     let detail = snapshot.details[threadId];
-    if (detail === undefined && apiVersion === 2 && options.t3.connected()) {
+    if (detail === undefined && apiVersion >= 2 && options.t3.connected()) {
       await options.t3.refreshThread(threadId);
       detail = options.store.snapshot().details[threadId];
     }
@@ -378,7 +419,10 @@ const routeRequest = async (
     sendJson(
       response,
       202,
-      await options.commands.createThread(await decodeCreateThread(await readJsonBody(request))),
+      await options.commands.createThread(
+        await decodeCreateThread(await readJsonBody(request)),
+        apiVersion === 1,
+      ),
     );
     return;
   }
@@ -401,14 +445,14 @@ const routeRequest = async (
       await options.commands.startTurn(
         threadId,
         await decodeStartTurn(await readJsonBody(request)),
-        apiVersion === 2,
+        apiVersion >= 2,
       ),
     );
     return;
   }
 
   const forkMatch = /^\/v1\/threads\/([^/]+)\/forks$/.exec(path);
-  if (apiVersion === 2 && method === "POST" && forkMatch?.[1] !== undefined) {
+  if (apiVersion >= 2 && method === "POST" && forkMatch?.[1] !== undefined) {
     const sourceThreadId = decodeURIComponent(forkMatch[1]);
     sendJson(
       response,
@@ -430,7 +474,7 @@ const routeRequest = async (
       await options.commands.interrupt(
         threadId,
         await decodeThreadCommand(await readJsonBody(request)),
-        apiVersion === 2,
+        apiVersion >= 2,
       ),
     );
     return;
@@ -445,7 +489,7 @@ const routeRequest = async (
       await options.commands.stop(
         threadId,
         await decodeThreadCommand(await readJsonBody(request)),
-        apiVersion === 2,
+        apiVersion >= 2,
       ),
     );
     return;
@@ -458,7 +502,7 @@ const routeRequest = async (
     sendJson(
       response,
       202,
-      await options.commands.respondApproval(body.threadId, requestId, body, apiVersion === 2),
+      await options.commands.respondApproval(body.threadId, requestId, body, apiVersion >= 2),
     );
     return;
   }
@@ -470,12 +514,25 @@ const routeRequest = async (
     sendJson(
       response,
       202,
-      await options.commands.respondUserInput(body.threadId, requestId, body, apiVersion === 2),
+      await options.commands.respondUserInput(body.threadId, requestId, body, apiVersion >= 2),
     );
     return;
   }
 
   sendJson(response, 404, { error: "not_found" });
+};
+
+/**
+ * Fail closed when the client pins a different manifest major version. The
+ * header is optional; clients that negotiated via GET /v3/capabilities send it
+ * so an incompatible upgrade cannot silently dispatch commands.
+ */
+const requireCompatibleManifest = (request: NodeHttp.IncomingMessage): void => {
+  const header = request.headers["x-manifest-major"];
+  const value = Array.isArray(header) ? header[0] : header;
+  if (value !== undefined && value !== String(MANIFEST_SCHEMA_MAJOR)) {
+    throw new BridgeCommandError("bridge_incompatible");
+  }
 };
 
 const authorized = (request: NodeHttp.IncomingMessage, expected: string): boolean => {
