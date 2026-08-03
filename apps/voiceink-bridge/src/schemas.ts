@@ -221,6 +221,24 @@ export const decodeWorkspaceMaterialize = Schema.decodeUnknownPromise(WorkspaceM
   onExcessProperty: "error",
 });
 
+export const WorkspaceFollowUpRequest = Schema.Struct({
+  expectedRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  operationId: CommandId,
+  commandId: CommandId,
+  messageId: Identifier,
+  text: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(120_000)),
+  modelSelection: Schema.optional(Schema.Struct({ instanceId: Identifier, model: Identifier })),
+  runtimeMode: Schema.optional(
+    Schema.Literals(["approval-required", "auto-accept-edits", "auto", "full-access"]),
+  ),
+  interactionMode: Schema.optional(Schema.Literals(["default", "plan"])),
+});
+export type WorkspaceFollowUpRequest = typeof WorkspaceFollowUpRequest.Type;
+
+export const decodeWorkspaceFollowUp = Schema.decodeUnknownPromise(WorkspaceFollowUpRequest, {
+  onExcessProperty: "error",
+});
+
 // Consultation contracts (plan phase 6).
 
 export const ConsultationStartRequest = Schema.Struct({

@@ -19,6 +19,7 @@ import {
   decodeUserInputResponse,
   decodeConsultationStart,
   decodeWorkspaceCreate,
+  decodeWorkspaceFollowUp,
   decodeWorkspaceMaterialize,
   decodeWorkspacePatch,
   decodeWorkspaceTransition,
@@ -295,7 +296,10 @@ const routeRequest = async (
     }
   }
 
-  const workspaceMatch = /^\/v1\/workspaces\/([^/]+)(\/(?:state|materialize))?$/.exec(path);
+  const workspaceMatch =
+    /^\/v1\/workspaces\/([^/]+)(\/(?:state|materialize|follow-up|pending-results(?:\/[^/]+\/ack)?))?$/.exec(
+      path,
+    );
   if (apiVersion === 3 && workspaceMatch?.[1] !== undefined) {
     const workspaceId = decodeURIComponent(workspaceMatch[1]);
     const subresource = workspaceMatch[2] ?? "";
@@ -342,6 +346,33 @@ const routeRequest = async (
           body.operationId,
           body.state,
         ),
+      });
+      return;
+    }
+    if (method === "POST" && subresource === "/follow-up") {
+      const body = await decodeWorkspaceFollowUp(await readJsonBody(request));
+      sendJson(
+        response,
+        202,
+        await options.workspaces.followUp(workspaceId, body.expectedRevision, body.operationId, {
+          commandId: body.commandId,
+          messageId: body.messageId,
+          text: body.text,
+          ...(body.modelSelection === undefined ? {} : { modelSelection: body.modelSelection }),
+          ...(body.runtimeMode === undefined ? {} : { runtimeMode: body.runtimeMode }),
+          ...(body.interactionMode === undefined ? {} : { interactionMode: body.interactionMode }),
+        }),
+      );
+      return;
+    }
+    if (method === "GET" && subresource === "/pending-results") {
+      sendJson(response, 200, { pendingResults: options.workspaces.pendingResults(workspaceId) });
+      return;
+    }
+    const ackMatch = /^\/pending-results\/([^/]+)\/ack$/.exec(subresource ?? "");
+    if (method === "POST" && ackMatch?.[1] !== undefined) {
+      sendJson(response, 200, {
+        result: options.workspaces.acknowledgeResult(workspaceId, decodeURIComponent(ackMatch[1])),
       });
       return;
     }

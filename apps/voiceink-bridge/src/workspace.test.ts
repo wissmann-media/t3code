@@ -352,6 +352,155 @@ describe("Conversation workspace and task draft", () => {
     }
   });
 
+  it("correlates linked execution events and settles into monitoring", async () => {
+    const { service, store } = makeService();
+    const created = service.create("workspace-20", "client");
+    const patched = service.patch("workspace-20", created.revision, "op-draft", readyDraftPatch);
+    await service.materialize(
+      "workspace-20",
+      patched.revision,
+      "op-materialize",
+      { utterance: "Setz um.", draftRevision: patched.draft.draftRevision },
+      { mode: "create", commandId: "command-20", threadId: "thread-exec", messageId: "m-20" },
+    );
+    const events: Array<Record<string, unknown>> = [];
+    const unsubscribe = store.subscribe((event) => {
+      if (event.type === "workspace.execution") events.push({ ...event.payload });
+    });
+    store.applyShellItem({
+      kind: "thread-upserted",
+      sequence: 30,
+      thread: {
+        ...threadShell(),
+        id: "thread-exec",
+        title: "Execution",
+        session: { status: "running" },
+      } as never,
+    });
+    store.applyShellItem({
+      kind: "thread-upserted",
+      sequence: 31,
+      thread: {
+        ...threadShell(),
+        id: "thread-exec",
+        title: "Execution",
+        latestTurn: { ...threadShell().latestTurn, state: "completed" },
+      } as never,
+    });
+    unsubscribe();
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    expect(events[0]).toMatchObject({
+      workspaceId: "workspace-20",
+      threadId: "thread-exec",
+      commandId: "command-20",
+      kind: "activity",
+    });
+    expect(events.at(-1)).toMatchObject({ kind: "final", status: "completed" });
+    expect(service.get("workspace-20").state).toBe("monitoring");
+  });
+
+  it("delivers a pending terminal result exactly once after reconnect", async () => {
+    const { service, store } = makeService();
+    const created = service.create("workspace-21", "client");
+    const patched = service.patch("workspace-21", created.revision, "op-draft", readyDraftPatch);
+    await service.materialize(
+      "workspace-21",
+      patched.revision,
+      "op-materialize",
+      { utterance: "Setz um.", draftRevision: patched.draft.draftRevision },
+      { mode: "create", commandId: "command-21", threadId: "thread-late", messageId: "m-21" },
+    );
+    const completedShell = () =>
+      ({
+        ...threadShell(),
+        id: "thread-late",
+        title: "Late",
+        latestTurn: { ...threadShell().latestTurn, state: "completed" },
+      }) as never;
+    store.applyShellItem({ kind: "thread-upserted", sequence: 40, thread: completedShell() });
+    // A duplicate terminal event must not create a second pending result.
+    store.applyShellItem({ kind: "thread-upserted", sequence: 41, thread: completedShell() });
+    const pending = service.pendingResults("workspace-21");
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ threadId: "thread-late", kind: "final" });
+
+    const delivered = service.acknowledgeResult("workspace-21", "thread-late");
+    expect(delivered.deliveredAt).not.toBeNull();
+    expect(
+      service.pendingResults("workspace-21").filter((result) => result.deliveredAt === null),
+    ).toHaveLength(0);
+    expect(() => service.acknowledgeResult("workspace-21", "thread-late")).toThrowError(
+      /not_found/,
+    );
+  });
+
+  it("continues follow-ups in the active session preserving model and modes", async () => {
+    const { service, dispatched } = makeService();
+    const created = service.create("workspace-22", "client");
+    const withThread = service.patch("workspace-22", created.revision, "op-thread", {
+      activeThreadId: "thread-1",
+    });
+    const outcome = await service.followUp("workspace-22", withThread.revision, "op-follow", {
+      commandId: "command-22",
+      messageId: "m-22",
+      text: "Bitte Option B umsetzen wie besprochen.",
+    });
+    expect(outcome.result.receipt.status).toBe("accepted");
+    expect(outcome.workspace.state).toBe("executing");
+    expect(dispatched[0]).toMatchObject({
+      type: "thread.turn.start",
+      threadId: "thread-1",
+      modelSelection: { instanceId: "codex-default", model: "gpt-test" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+    });
+    // Replay after reconnect: no second dispatch.
+    const replay = await service.followUp("workspace-22", outcome.workspace.revision, "op-follow", {
+      commandId: "command-22",
+      messageId: "m-22",
+      text: "Bitte Option B umsetzen.",
+    });
+    expect(replay.result.receipt.commandId).toBe("command-22");
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it("keeps concurrent workspace executions independent", async () => {
+    const { service, store } = makeService();
+    for (const [workspaceId, threadId, suffix] of [
+      ["workspace-23", "thread-a23", "a"],
+      ["workspace-24", "thread-b24", "b"],
+    ] as const) {
+      const created = service.create(workspaceId, "client");
+      const patched = service.patch(
+        workspaceId,
+        created.revision,
+        `op-draft-${suffix}`,
+        readyDraftPatch,
+      );
+      await service.materialize(
+        workspaceId,
+        patched.revision,
+        `op-materialize-${suffix}`,
+        { utterance: "Setz um.", draftRevision: patched.draft.draftRevision },
+        { mode: "create", commandId: `command-${suffix}`, threadId, messageId: `m-${suffix}` },
+      );
+    }
+    store.applyShellItem({
+      kind: "thread-upserted",
+      sequence: 50,
+      thread: {
+        ...threadShell(),
+        id: "thread-a23",
+        title: "A",
+        latestTurn: { ...threadShell().latestTurn, state: "completed" },
+      } as never,
+    });
+    expect(service.pendingResults("workspace-23")).toHaveLength(1);
+    expect(service.pendingResults("workspace-24")).toHaveLength(0);
+    expect(service.get("workspace-23").state).toBe("monitoring");
+    expect(service.get("workspace-24").state).toBe("executing");
+  });
+
   it("emits workspace events on the shared bridge stream", () => {
     const { service, store } = makeService();
     const events: string[] = [];

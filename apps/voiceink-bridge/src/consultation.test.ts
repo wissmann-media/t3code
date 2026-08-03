@@ -153,10 +153,11 @@ const makeService = (
 };
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 1_000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
+  let waited = 0;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("waitFor timed out");
+    if (waited > timeoutMs) throw new Error("waitFor timed out");
     await new Promise((resolve) => setTimeout(resolve, 10));
+    waited += 10;
   }
 };
 

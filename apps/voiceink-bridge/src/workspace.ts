@@ -84,6 +84,19 @@ export interface LinkedExecution {
   readonly materializedAt: string;
 }
 
+/**
+ * A safe handle for a terminal execution result that has not been spoken yet.
+ * After a reconnect the client presents it exactly once; intermediate speech
+ * is never replayed.
+ */
+export interface PendingExecutionResult {
+  readonly workspaceId: string;
+  readonly threadId: string;
+  readonly kind: "final" | "failure";
+  readonly createdAt: string;
+  readonly deliveredAt: string | null;
+}
+
 export interface ConversationWorkspace {
   readonly schemaVersion: 1;
   readonly workspaceId: string;
@@ -140,6 +153,7 @@ interface PersistedWorkspaces {
   readonly operations: ReadonlyArray<readonly [string, string, number]>;
   /** Consumed one-time authorizations: workspaceId:draftRevision:digest. */
   readonly consumedAuthorizations: ReadonlyArray<string>;
+  readonly pendingResults?: ReadonlyArray<PendingExecutionResult>;
 }
 
 const MAX_WORKSPACES = 200;
@@ -177,6 +191,10 @@ export class WorkspaceService {
     this.commands = commands;
     this.filePath = filePath;
     this.state = this.load();
+    // The workspace follows every linked execution: thread events are
+    // correlated back to workspace, draft revision, and command so one T3
+    // turn yields exactly one substantive result.
+    this.store.subscribe((event) => this.onExecutionEvent(event));
   }
 
   list(): ReadonlyArray<ConversationWorkspace> {
@@ -417,6 +435,197 @@ export class WorkspaceService {
     };
     this.commitOperation(operationId, next);
     return { workspace: next, result };
+  }
+
+  pendingResults(workspaceId: string): ReadonlyArray<PendingExecutionResult> {
+    this.get(workspaceId);
+    return (this.state.pendingResults ?? []).filter((result) => result.workspaceId === workspaceId);
+  }
+
+  /** Deliver a pending result exactly once. */
+  acknowledgeResult(workspaceId: string, threadId: string): PendingExecutionResult {
+    const pending = (this.state.pendingResults ?? []).find(
+      (result) =>
+        result.workspaceId === workspaceId &&
+        result.threadId === threadId &&
+        result.deliveredAt === null,
+    );
+    if (pending === undefined) throw new WorkspaceError("not_found");
+    const delivered: PendingExecutionResult = { ...pending, deliveredAt: nowIso() };
+    this.state = {
+      ...this.state,
+      pendingResults: (this.state.pendingResults ?? []).map((result) =>
+        result === pending ? delivered : result,
+      ),
+    };
+    this.persist();
+    return delivered;
+  }
+
+  /**
+   * Continue work in the validated active session. Model, options, and modes
+   * come from the thread's authoritative current state unless the user
+   * explicitly changes them — follow-ups never drift to another provider.
+   */
+  async followUp(
+    workspaceId: string,
+    expectedRevision: number,
+    operationId: string,
+    request: {
+      readonly commandId: string;
+      readonly messageId: string;
+      readonly text: string;
+      readonly modelSelection?: { readonly instanceId: string; readonly model: string } | undefined;
+      readonly runtimeMode?: string | undefined;
+      readonly interactionMode?: string | undefined;
+    },
+  ): Promise<{
+    readonly workspace: ConversationWorkspace;
+    readonly result: CanonicalCommandResult;
+  }> {
+    const workspace = this.get(workspaceId);
+    if (
+      this.state.operations.some(([id, target]) => id === operationId && target === workspaceId)
+    ) {
+      const receipt = this.commands.receiptFor(request.commandId);
+      if (receipt !== undefined) {
+        return {
+          workspace,
+          result: { receipt, verification: { state: "not-applicable" }, thread: null },
+        };
+      }
+    }
+    if (workspace.revision !== expectedRevision) throw new WorkspaceError("stale_revision");
+    const threadId = workspace.activeThreadId;
+    if (threadId === null) throw new WorkspaceError("draft_incomplete");
+    const thread = this.snapshotThreads().find(
+      (candidate) => candidate.id === threadId && candidate.freshness === "live",
+    );
+    if (thread === undefined) throw new WorkspaceError("draft_incomplete");
+    const command = await decodeCanonicalCommand({
+      type: "thread.turn.start",
+      commandId: request.commandId,
+      threadId,
+      message: {
+        messageId: request.messageId,
+        role: "user",
+        text: request.text,
+        attachments: [],
+      },
+      modelSelection: request.modelSelection ?? {
+        instanceId: thread.providerInstanceId,
+        model: thread.model,
+      },
+      runtimeMode: request.runtimeMode ?? thread.runtimeMode,
+      interactionMode: request.interactionMode ?? thread.interactionMode,
+      createdAt: nowIso(),
+    });
+    const result = await this.commands.canonical(command, { operationId, workspaceId });
+    if (result.receipt.status !== "accepted" && result.receipt.status !== "completed") {
+      return { workspace, result };
+    }
+    const linked: LinkedExecution = {
+      threadId,
+      commandId: request.commandId,
+      draftRevision: workspace.draft.draftRevision,
+      mode: "reuse",
+      materializedAt: nowIso(),
+    };
+    const next: ConversationWorkspace = {
+      ...workspace,
+      revision: workspace.revision + 1,
+      state: workspace.state === "closed" ? workspace.state : "executing",
+      linkedExecutions: [...workspace.linkedExecutions, linked].slice(-32),
+      updatedAt: nowIso(),
+    };
+    this.commitOperation(operationId, next);
+    return { workspace: next, result };
+  }
+
+  private onExecutionEvent(event: {
+    readonly type: string;
+    readonly sequence: number;
+    readonly threadId?: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }): void {
+    const threadId = event.threadId;
+    if (threadId === undefined) return;
+    if (event.type.startsWith("workspace.")) return;
+    for (const workspace of this.state.workspaces) {
+      const linked = workspace.linkedExecutions.find(
+        (execution) => execution.threadId === threadId,
+      );
+      if (linked === undefined) continue;
+      const status = (event.payload as { readonly status?: string }).status;
+      const kind =
+        status === "completed"
+          ? "final"
+          : status === "failed"
+            ? "failure"
+            : status === "waiting_for_approval" || status === "waiting_for_input"
+              ? "interaction"
+              : "activity";
+      this.store.emitExternalEvent(
+        "workspace.execution",
+        `workspace-execution:${workspace.workspaceId}:${threadId}:${String(event.sequence)}`,
+        {
+          threadId,
+          freshness: "live",
+          payload: {
+            workspaceId: workspace.workspaceId,
+            threadId,
+            commandId: linked.commandId,
+            draftRevision: linked.draftRevision,
+            kind,
+            ...(status === undefined ? {} : { status }),
+          },
+        },
+      );
+      if (kind === "final" || kind === "failure") {
+        this.recordPendingResult(workspace.workspaceId, threadId, kind);
+        this.noteExecutionSettled(workspace.workspaceId);
+      }
+    }
+  }
+
+  private recordPendingResult(
+    workspaceId: string,
+    threadId: string,
+    kind: "final" | "failure",
+  ): void {
+    const pending = this.state.pendingResults ?? [];
+    // Duplicate terminal events for the same undelivered result are dropped:
+    // one T3 turn produces one substantive spoken result.
+    const existing = pending.find(
+      (result) =>
+        result.workspaceId === workspaceId &&
+        result.threadId === threadId &&
+        result.deliveredAt === null,
+    );
+    if (existing !== undefined) return;
+    this.state = {
+      ...this.state,
+      pendingResults: [
+        ...pending,
+        { workspaceId, threadId, kind, createdAt: nowIso(), deliveredAt: null },
+      ].slice(-64),
+    };
+    this.persist();
+  }
+
+  private noteExecutionSettled(workspaceId: string): void {
+    const workspace = this.state.workspaces.find(
+      (candidate) => candidate.workspaceId === workspaceId,
+    );
+    if (workspace === undefined || workspace.state !== "executing") return;
+    const next: ConversationWorkspace = {
+      ...workspace,
+      revision: workspace.revision + 1,
+      state: "monitoring",
+      updatedAt: nowIso(),
+    };
+    this.replaceWorkspace(next);
+    this.emit(next, "workspace.updated");
   }
 
   private buildCommand(
