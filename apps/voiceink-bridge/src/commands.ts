@@ -81,6 +81,10 @@ export class BridgeCommandService {
     return this.verifyPostState(command);
   }
 
+  receiptFor(commandId: string): CommandReceipt | undefined {
+    return this.store.receipt(commandId)?.receipt;
+  }
+
   async previewCanonical(command: CanonicalCommand): Promise<CanonicalCommandPreview> {
     const snapshot = this.store.snapshot();
     const destructive = DESTRUCTIVE_COMMAND_TYPES.has(command.type);

@@ -17,7 +17,12 @@ import {
   decodeStartTurn,
   decodeThreadCommand,
   decodeUserInputResponse,
+  decodeWorkspaceCreate,
+  decodeWorkspaceMaterialize,
+  decodeWorkspacePatch,
+  decodeWorkspaceTransition,
 } from "./schemas.ts";
+import { WorkspaceError, WorkspaceService } from "./workspace.ts";
 import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
 import {
@@ -36,7 +41,7 @@ const reportedApiVersion = (apiVersion: number): number =>
     : apiVersion === 2
       ? BRIDGE_API_VERSION
       : LEGACY_BRIDGE_API_VERSION;
-import { nowEpochMillis } from "./time.ts";
+import { nowEpochMillis, nowIso } from "./time.ts";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -68,6 +73,7 @@ export interface BridgeServer {
 export const createBridgeServer = (options: {
   readonly store: BridgeStore;
   readonly commands: BridgeCommandService;
+  readonly workspaces: WorkspaceService;
   readonly t3: T3Client;
   readonly bearerToken: string;
   readonly pairing: BridgePairingSession;
@@ -89,6 +95,12 @@ export const createBridgeServer = (options: {
                   error.code === "bridge_incompatible"
                 ? 409
                 : 503;
+        sendJson(response, status, { error: error.code });
+        return;
+      }
+      if (error instanceof WorkspaceError) {
+        const status =
+          error.code === "not_found" ? 404 : error.code === "draft_incomplete" ? 422 : 409;
         sendJson(response, status, { error: error.code });
         return;
       }
@@ -149,6 +161,7 @@ const routeRequest = async (
   options: {
     readonly store: BridgeStore;
     readonly commands: BridgeCommandService;
+    readonly workspaces: WorkspaceService;
     readonly t3: T3Client;
     readonly bearerToken: string;
     readonly pairing: BridgePairingSession;
@@ -225,6 +238,87 @@ const routeRequest = async (
     ))
   ) {
     return;
+  }
+
+  if (apiVersion === 3 && path === "/v1/workspaces") {
+    if (method === "GET") {
+      sendJson(response, 200, { workspaces: options.workspaces.list() });
+      return;
+    }
+    if (method === "POST") {
+      const body = await decodeWorkspaceCreate(await readJsonBody(request));
+      sendJson(response, 201, {
+        workspace: options.workspaces.create(body.workspaceId, body.clientId),
+      });
+      return;
+    }
+  }
+
+  const workspaceMatch = /^\/v1\/workspaces\/([^/]+)(\/(?:state|materialize))?$/.exec(path);
+  if (apiVersion === 3 && workspaceMatch?.[1] !== undefined) {
+    const workspaceId = decodeURIComponent(workspaceMatch[1]);
+    const subresource = workspaceMatch[2] ?? "";
+    if (method === "GET" && subresource === "") {
+      sendJson(response, 200, { workspace: options.workspaces.get(workspaceId) });
+      return;
+    }
+    if (method === "PATCH" && subresource === "") {
+      const body = await decodeWorkspacePatch(await readJsonBody(request));
+      const workspace = options.workspaces.patch(
+        workspaceId,
+        body.expectedRevision,
+        body.operationId,
+        {
+          ...(body.activeProjectId === undefined ? {} : { activeProjectId: body.activeProjectId }),
+          ...(body.activeThreadId === undefined ? {} : { activeThreadId: body.activeThreadId }),
+          ...(body.referencedThreadIds === undefined
+            ? {}
+            : { referencedThreadIds: body.referencedThreadIds }),
+          ...(body.pendingQuestions === undefined
+            ? {}
+            : { pendingQuestions: body.pendingQuestions }),
+          ...(body.draft === undefined ? {} : { draft: body.draft }),
+          ...(body.decision === undefined
+            ? {}
+            : {
+                decision: {
+                  at: nowIso(),
+                  source: body.decision.source,
+                  text: body.decision.text,
+                },
+              }),
+        },
+      );
+      sendJson(response, 200, { workspace });
+      return;
+    }
+    if (method === "POST" && subresource === "/state") {
+      const body = await decodeWorkspaceTransition(await readJsonBody(request));
+      sendJson(response, 200, {
+        workspace: options.workspaces.transition(
+          workspaceId,
+          body.expectedRevision,
+          body.operationId,
+          body.state,
+        ),
+      });
+      return;
+    }
+    if (method === "POST" && subresource === "/materialize") {
+      const body = await decodeWorkspaceMaterialize(await readJsonBody(request));
+      sendJson(
+        response,
+        202,
+        await options.workspaces.materialize(
+          workspaceId,
+          body.expectedRevision,
+          body.operationId,
+          body.authorization,
+          body.execution,
+        ),
+      );
+      return;
+    }
   }
 
   if (method === "GET" && path === "/v1/capabilities") {

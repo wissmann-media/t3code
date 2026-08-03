@@ -9,6 +9,7 @@ import {
 } from "./credentials.ts";
 import { createBridgeServer, BridgePairingSession } from "./server.ts";
 import { BridgeStore, resumableShellCursor } from "./store.ts";
+import { WorkspaceService } from "./workspace.ts";
 import { EffectT3Client } from "./t3Client.ts";
 import type { BridgeEnvironment } from "./types.ts";
 
@@ -60,10 +61,16 @@ const run = async (): Promise<void> => {
   };
   const t3 = new EffectT3Client(t3Url, t3Bearer, callbacks);
   const commands = new BridgeCommandService(store, t3);
+  const workspaces = new WorkspaceService(
+    store,
+    commands,
+    NodePath.join(NodePath.dirname(stateFile), "workspaces.json"),
+  );
   const pairing = new BridgePairingSession(bridgeBearer);
   const server = createBridgeServer({
     store,
     commands,
+    workspaces,
     t3,
     bearerToken: bridgeBearer,
     pairing,

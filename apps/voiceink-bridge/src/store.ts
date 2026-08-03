@@ -325,6 +325,24 @@ export class BridgeStore {
     });
   }
 
+  /**
+   * Append an event produced by a sibling Bridge service (e.g. the
+   * conversation workspace) so every connected client sees it on the same
+   * SSE stream with the same cursor semantics.
+   */
+  emitExternalEvent(
+    type: string,
+    dedupeKey: string,
+    fields: {
+      readonly projectId?: string;
+      readonly threadId?: string;
+      readonly freshness: BridgeStatusEvent["freshness"];
+      readonly payload: Readonly<Record<string, unknown>>;
+    },
+  ): void {
+    this.appendEvent(type, dedupeKey, fields);
+  }
+
   receipt(commandId: string): CommandReceiptRecord | undefined {
     return this.state.commandReceipts.find((record) => record.receipt.commandId === commandId);
   }

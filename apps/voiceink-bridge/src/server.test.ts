@@ -6,6 +6,7 @@ import type {
 import { describe, expect, it } from "vite-plus/test";
 
 import { BridgeCommandService } from "./commands.ts";
+import { WorkspaceService } from "./workspace.ts";
 import { BridgePairingSession, createBridgeServer } from "./server.ts";
 import { BridgeStore } from "./store.ts";
 import type { T3Client } from "./t3Client.ts";
@@ -988,9 +989,11 @@ const withServer = async (
   const store = liveStore();
   const dispatched: unknown[] = [];
   const t3 = fakeT3(dispatched, store);
+  const commands = new BridgeCommandService(store, t3, { verificationTimeoutMs: 25 });
   const server = createBridgeServer({
     store,
-    commands: new BridgeCommandService(store, t3, { verificationTimeoutMs: 25 }),
+    commands,
+    workspaces: new WorkspaceService(store, commands),
     t3,
     bearerToken,
     pairing: new BridgePairingSession(bearerToken),

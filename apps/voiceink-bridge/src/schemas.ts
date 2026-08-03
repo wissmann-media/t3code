@@ -119,3 +119,104 @@ export const decodeCanonicalCommand = Schema.decodeUnknownPromise(ClientOrchestr
   onExcessProperty: "error",
 });
 export type CanonicalCommand = ClientOrchestrationCommand;
+
+// Conversation workspace contracts (plan phase 4).
+
+const BoundedText = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4_000));
+const BoundedTextArray = Schema.Array(BoundedText).check(Schema.isMaxLength(32));
+const WorkspaceStateLiteral = Schema.Literals([
+  "exploring",
+  "shaping",
+  "ready",
+  "executing",
+  "monitoring",
+  "follow-up",
+  "closed",
+]);
+
+export const WorkspaceCreateRequest = Schema.Struct({
+  workspaceId: Identifier,
+  clientId: Identifier,
+});
+
+const WorkspaceDraftPatch = Schema.Struct({
+  goal: Schema.optional(Schema.NullOr(BoundedText)),
+  background: Schema.optional(Schema.NullOr(BoundedText)),
+  scope: Schema.optional(BoundedTextArray),
+  constraints: Schema.optional(BoundedTextArray),
+  targetProjectId: Schema.optional(Schema.NullOr(Identifier)),
+  sessionStrategy: Schema.optional(Schema.NullOr(Schema.Literals(["reuse", "fork", "create"]))),
+  targetThreadId: Schema.optional(Schema.NullOr(Identifier)),
+  modelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  runtimeMode: Schema.optional(
+    Schema.NullOr(
+      Schema.Literals(["approval-required", "auto-accept-edits", "auto", "full-access"]),
+    ),
+  ),
+  interactionMode: Schema.optional(Schema.NullOr(Schema.Literals(["default", "plan"]))),
+  branch: Schema.optional(Schema.NullOr(Identifier)),
+  worktreeIntent: Schema.optional(
+    Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  ),
+  acceptanceCriteria: Schema.optional(BoundedTextArray),
+  unresolvedDecisions: Schema.optional(BoundedTextArray),
+  riskFlags: Schema.optional(BoundedTextArray),
+  providerPrompt: Schema.optional(
+    Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(20_000))),
+  ),
+});
+
+export const WorkspacePatchRequest = Schema.Struct({
+  expectedRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  operationId: CommandId,
+  activeProjectId: Schema.optional(Schema.NullOr(Identifier)),
+  activeThreadId: Schema.optional(Schema.NullOr(Identifier)),
+  referencedThreadIds: Schema.optional(Schema.Array(Identifier).check(Schema.isMaxLength(32))),
+  pendingQuestions: Schema.optional(BoundedTextArray),
+  draft: Schema.optional(WorkspaceDraftPatch),
+  decision: Schema.optional(
+    Schema.Struct({
+      source: Schema.Literals(["user", "insa", "t3-evidence", "assumption"]),
+      text: BoundedText,
+    }),
+  ),
+});
+
+export const WorkspaceTransitionRequest = Schema.Struct({
+  expectedRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  operationId: CommandId,
+  state: WorkspaceStateLiteral,
+});
+
+export const WorkspaceMaterializeRequest = Schema.Struct({
+  expectedRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  operationId: CommandId,
+  authorization: Schema.Struct({
+    utterance: BoundedText,
+    draftRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  }),
+  execution: Schema.Struct({
+    mode: Schema.Literals(["create", "reuse", "fork"]),
+    commandId: CommandId,
+    threadId: Identifier,
+    messageId: Identifier,
+  }),
+});
+
+export type WorkspaceCreateRequest = typeof WorkspaceCreateRequest.Type;
+export type WorkspacePatchRequest = typeof WorkspacePatchRequest.Type;
+export type WorkspaceTransitionRequest = typeof WorkspaceTransitionRequest.Type;
+export type WorkspaceMaterializeRequest = typeof WorkspaceMaterializeRequest.Type;
+
+export const decodeWorkspaceCreate = Schema.decodeUnknownPromise(WorkspaceCreateRequest, {
+  onExcessProperty: "error",
+});
+export const decodeWorkspacePatch = Schema.decodeUnknownPromise(WorkspacePatchRequest, {
+  onExcessProperty: "error",
+});
+export const decodeWorkspaceTransition = Schema.decodeUnknownPromise(WorkspaceTransitionRequest, {
+  onExcessProperty: "error",
+});
+export const decodeWorkspaceMaterialize = Schema.decodeUnknownPromise(WorkspaceMaterializeRequest, {
+  onExcessProperty: "error",
+});
