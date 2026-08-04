@@ -127,6 +127,21 @@ export const createBridgeServer = (options: {
         sendJson(response, 422, { error: "invalid_request" });
         return;
       }
+      // T3 connectivity and T3-side rejections are not bridge defects. They
+      // get their own codes so the client can say what is actually wrong
+      // instead of reporting a generic internal error.
+      if (error instanceof Error && error.message === "t3_unavailable") {
+        logRequestFailure(request, "t3 unavailable", error);
+        sendJson(response, 503, { error: "t3_unavailable" });
+        return;
+      }
+      if (typeof error === "string") {
+        // Effect RPC surfaces T3-side failures (unknown or failing method) as
+        // a raw string in the error channel.
+        logRequestFailure(request, "t3 rejected the call", error);
+        sendJson(response, 502, { error: "t3_rpc_failed" });
+        return;
+      }
       logRequestFailure(request, "internal error", error);
       sendJson(response, 500, { error: "internal_error" });
     });

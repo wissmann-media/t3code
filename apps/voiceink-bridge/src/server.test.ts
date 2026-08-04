@@ -743,6 +743,38 @@ describe("Bridge v3 canonical surface", () => {
 });
 
 describe("Bridge v3 read surface", () => {
+  it("reports a disconnected T3 as unavailable instead of an internal error", async () => {
+    await withServer(
+      async ({ baseUrl }) => {
+        const response = await authorizedFetch(`${baseUrl}/v3/search?q=Importer`);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: "t3_unavailable" });
+      },
+      {
+        archivedShellSnapshot: async () => {
+          throw new Error("t3_unavailable");
+        },
+      },
+    );
+  });
+
+  it("reports a T3-side rejection as an upstream failure, not a bridge defect", async () => {
+    await withServer(
+      async ({ baseUrl }) => {
+        const response = await authorizedFetch(`${baseUrl}/v3/search?q=Importer`);
+        expect(response.status).toBe(502);
+        expect(await response.json()).toEqual({ error: "t3_rpc_failed" });
+      },
+      {
+        // Effect RPC surfaces an unknown or failing T3 method as a raw string;
+        // an older T3 build without this method looks exactly like this.
+        archivedShellSnapshot: async () => {
+          throw "orchestration.getArchivedShellSnapshot";
+        },
+      },
+    );
+  });
+
   it("searches active and archived threads with German folding and merged content matches", async () => {
     await withServer(async ({ baseUrl }) => {
       const archived = await authorizedFetch(`${baseUrl}/v3/search?q=ubersicht`);
@@ -986,10 +1018,11 @@ describe("Bridge v3 read surface", () => {
 
 const withServer = async (
   test: (context: { baseUrl: string; store: BridgeStore; dispatched: unknown[] }) => Promise<void>,
+  overrides: Partial<T3Client> = {},
 ): Promise<void> => {
   const store = liveStore();
   const dispatched: unknown[] = [];
-  const t3 = fakeT3(dispatched, store);
+  const t3 = { ...fakeT3(dispatched, store), ...overrides } as T3Client;
   const commands = new BridgeCommandService(store, t3, { verificationTimeoutMs: 25 });
   const server = createBridgeServer({
     store,
