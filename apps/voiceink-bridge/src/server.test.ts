@@ -758,6 +758,39 @@ describe("Bridge v3 read surface", () => {
     );
   });
 
+  it("keeps title search working when T3 cannot search contents, and declares it", async () => {
+    await withServer(
+      async ({ baseUrl }) => {
+        const response = await authorizedFetch(`${baseUrl}/v3/search?q=ubersicht`);
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          contentSearch: string;
+          results: Array<{ threadId: string; matchedBy: string[] }>;
+        };
+        // Reduced coverage must be declared, never silently implied.
+        expect(body.contentSearch).toBe("unsupported");
+        expect(body.results).toHaveLength(1);
+        expect(body.results[0]).toMatchObject({
+          threadId: "thread-archived",
+          matchedBy: ["title"],
+        });
+      },
+      {
+        searchThreads: async () => {
+          throw "orchestration.searchThreads";
+        },
+      },
+    );
+  });
+
+  it("declares full content coverage when T3 supports the search", async () => {
+    await withServer(async ({ baseUrl }) => {
+      const response = await authorizedFetch(`${baseUrl}/v3/search?q=Importer`);
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { contentSearch: string }).contentSearch).toBe("live");
+    });
+  });
+
   it("reports a T3-side rejection as an upstream failure, not a bridge defect", async () => {
     await withServer(
       async ({ baseUrl }) => {

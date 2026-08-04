@@ -237,7 +237,18 @@ const handleSearch = async (
     if (!known.has(thread.id)) known.set(thread.id, { archived: true, thread });
   }
 
-  const matches = await options.t3.searchThreads(query.trim(), 50);
+  // Content search is a newer T3 method. An older T3 build rejects it with a
+  // raw string; degrade to the title matches already collected rather than
+  // failing the whole read, and declare the reduced coverage so no caller can
+  // present a title-only result as a full-text answer.
+  let contentSearch: "live" | "unsupported" = "live";
+  let matches: Awaited<ReturnType<typeof options.t3.searchThreads>> = [];
+  try {
+    matches = await options.t3.searchThreads(query.trim(), 50);
+  } catch (error) {
+    if (error instanceof Error && error.message === "t3_unavailable") throw error;
+    contentSearch = "unsupported";
+  }
   for (const match of matches) {
     const shell = known.get(match.threadId);
     if (scope === "active" && shell?.archived !== false) continue;
@@ -286,6 +297,7 @@ const handleSearch = async (
   sendJson(response, 200, {
     query: query.trim(),
     scope,
+    contentSearch,
     results: page,
     nextCursor: offset + page.length < filtered.length ? String(offset + page.length) : null,
     totalMatched: filtered.length,
