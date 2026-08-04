@@ -122,6 +122,8 @@ interface Harness {
   readonly store: BridgeStore;
   readonly dispatched: unknown[];
   readonly retained: string[];
+  /** Monotonic shell sequence shared by fake projections and test items. */
+  readonly nextShellSequence: () => number;
 }
 
 const makeService = (
@@ -130,6 +132,8 @@ const makeService = (
   const store = makeStore(options);
   const dispatched: unknown[] = [];
   const retained: string[] = [];
+  let projectionSequence = 1;
+  const nextShellSequence = (): number => (projectionSequence += 1);
   const t3 = {
     start: () => {},
     stop: async () => {},
@@ -137,6 +141,35 @@ const makeService = (
     dispatch: async (command: unknown) => {
       if (options.failDispatch === true) throw new Error("provider_unavailable");
       dispatched.push(command);
+      // Mirror the T3 projection: bootstrap creation and archive become
+      // visible in the shell so awaitThread and post-state checks observe
+      // them, matching the fail-closed bootstrap semantics.
+      const typed = command as {
+        readonly type?: string;
+        readonly threadId?: string;
+        readonly bootstrap?: { readonly createThread?: unknown };
+      };
+      if (
+        typed.type === "thread.turn.start" &&
+        typed.bootstrap?.createThread !== undefined &&
+        typed.threadId !== undefined
+      ) {
+        store.applyShellItem({
+          kind: "thread-upserted",
+          sequence: nextShellSequence(),
+          thread: {
+            ...consultationThreadShell(typed.threadId, "running"),
+            archivedAt: null,
+          } as unknown as OrchestrationThreadShell,
+        });
+      }
+      if (typed.type === "thread.archive" && typed.threadId !== undefined) {
+        store.applyShellItem({
+          kind: "thread-upserted",
+          sequence: nextShellSequence(),
+          thread: consultationThreadShell(typed.threadId, "running"),
+        });
+      }
       return { sequence: dispatched.length };
     },
     threadDetail: async (threadId: string) => consultationDetail(threadId),
@@ -149,7 +182,13 @@ const makeService = (
     connected: () => true,
   } as unknown as T3Client;
   const commands = new BridgeCommandService(store, t3, { verificationTimeoutMs: 10 });
-  return { service: new ConsultationService(store, commands, t3), store, dispatched, retained };
+  return {
+    service: new ConsultationService(store, commands, t3),
+    store,
+    dispatched,
+    retained,
+    nextShellSequence,
+  };
 };
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 1_000): Promise<void> => {
@@ -169,6 +208,7 @@ describe("ConsultationRun", () => {
       projectId: "project-1",
       question: "Wie riskant ist die Elasticsearch-Migration?",
     });
+    expect(run.failureReason).toBe(null);
     expect(run.status).toBe("running");
     expect(run.threadId).toBe("consultation-consult-1");
     expect(dispatched[0]).toMatchObject({
@@ -211,7 +251,7 @@ describe("ConsultationRun", () => {
   });
 
   it("completes from the provider result with plan evidence and stable references", async () => {
-    const { service, store, retained } = makeService();
+    const { service, store, retained, nextShellSequence } = makeService();
     const run = await service.start({
       consultationId: "consult-4",
       projectId: "project-1",
@@ -219,7 +259,7 @@ describe("ConsultationRun", () => {
     });
     store.applyShellItem({
       kind: "thread-upserted",
-      sequence: 10,
+      sequence: nextShellSequence(),
       thread: consultationThreadShell(run.threadId, "completed"),
     });
     await waitFor(() => service.get("consult-4").status === "completed");
@@ -234,7 +274,7 @@ describe("ConsultationRun", () => {
   });
 
   it("cancels a running consultation and suppresses the late result", async () => {
-    const { service, store } = makeService();
+    const { service, store, nextShellSequence } = makeService();
     const run = await service.start({
       consultationId: "consult-5",
       projectId: "project-1",
@@ -245,7 +285,7 @@ describe("ConsultationRun", () => {
     // A late completion event must not resurrect the run.
     store.applyShellItem({
       kind: "thread-upserted",
-      sequence: 11,
+      sequence: nextShellSequence(),
       thread: consultationThreadShell(run.threadId, "completed"),
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -267,10 +307,10 @@ describe("ConsultationRun", () => {
   });
 
   it("derives project and model from a source thread for contextual consultation", async () => {
-    const { service, store, dispatched } = makeService();
+    const { service, store, dispatched, nextShellSequence } = makeService();
     store.applyShellItem({
       kind: "thread-upserted",
-      sequence: 12,
+      sequence: nextShellSequence(),
       thread: {
         ...consultationThreadShell("thread-source", "idle"),
         archivedAt: null,
@@ -282,11 +322,14 @@ describe("ConsultationRun", () => {
       sourceThreadId: "thread-source",
       question: "Wie hängt das mit der bestehenden Diskussion zusammen?",
     });
-    expect(dispatched.at(-1)).toMatchObject({
+    const turnStart = dispatched.findLast(
+      (command) => (command as { readonly type?: string }).type === "thread.turn.start",
+    );
+    expect(turnStart).toMatchObject({
       type: "thread.turn.start",
       bootstrap: { createThread: { projectId: "project-1" } },
     });
-    const prompt = (dispatched.at(-1) as { message: { text: string } }).message.text;
+    const prompt = (turnStart as { message: { text: string } }).message.text;
     expect(prompt).toContain("thread-source");
   });
 });

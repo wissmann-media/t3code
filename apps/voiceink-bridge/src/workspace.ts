@@ -54,7 +54,9 @@ export interface TaskDraft {
   readonly modelSelection: {
     readonly instanceId: string;
     readonly model: string;
-    readonly options?: ReadonlyArray<{ readonly id: string; readonly value: unknown }> | undefined;
+    readonly options?:
+      | ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>
+      | undefined;
   } | null;
   readonly runtimeMode: string | null;
   readonly interactionMode: string | null;
@@ -113,6 +115,28 @@ export interface ConversationWorkspace {
   readonly createdAt: string;
   readonly updatedAt: string;
 }
+
+type MaterializationPlan =
+  | {
+      readonly kind: "canonical";
+      readonly command: Record<string, unknown>;
+    }
+  | {
+      readonly kind: "fork";
+      readonly sourceThreadId: string;
+      readonly request: {
+        readonly commandId: string;
+        readonly threadId: string;
+        readonly messageId: string;
+        readonly title: string;
+        readonly text: string;
+        readonly modelSelection?: TaskDraft["modelSelection"] extends infer Selection
+          ? Exclude<Selection, null>
+          : never;
+        readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+        readonly interactionMode?: "default" | "plan";
+      };
+    };
 
 type DraftPatchFields = {
   readonly [Key in keyof Omit<TaskDraft, "draftRevision" | "decisionLog">]?:
@@ -376,7 +400,7 @@ export class WorkspaceService {
     if (
       this.state.operations.some(([id, target]) => id === operationId && target === workspaceId)
     ) {
-      const receipt = this.commands.receiptFor(execution.commandId);
+      const receipt = this.receiptForMaterialization(execution);
       if (receipt !== undefined) {
         return {
           workspace,
@@ -393,19 +417,25 @@ export class WorkspaceService {
     if (workspace.linkedExecutions.some((linked) => linked.draftRevision === draft.draftRevision)) {
       throw new WorkspaceError("already_materialized");
     }
-    const command = this.buildCommand(workspace, execution);
-    const digest = sha256(stableStringify({ command, workspaceId }));
+    const plan = this.buildMaterializationPlan(workspace, execution);
+    const digest = sha256(stableStringify({ plan, workspaceId }));
     const authorizationKey = `${workspaceId}:${String(draft.draftRevision)}:${digest}`;
     if (this.state.consumedAuthorizations.includes(authorizationKey)) {
       throw new WorkspaceError("already_materialized");
     }
 
-    const decoded = await decodeCanonicalCommand(command);
-    const result = await this.commands.canonical(decoded, {
-      operationId,
-      workspaceId,
-      draftRevision: draft.draftRevision,
-    });
+    const result: CanonicalCommandResult =
+      plan.kind === "fork"
+        ? {
+            receipt: await this.commands.forkThread(plan.sourceThreadId, plan.request),
+            verification: { state: "not-applicable" },
+            thread: null,
+          }
+        : await this.commands.canonical(await decodeCanonicalCommand(plan.command), {
+            operationId,
+            workspaceId,
+            draftRevision: draft.draftRevision,
+          });
     if (result.receipt.status !== "accepted" && result.receipt.status !== "completed") {
       // Partial failure: the commitment stays unconsumed, no execution is
       // linked, the draft remains ready, and nothing is left half-created
@@ -628,7 +658,7 @@ export class WorkspaceService {
     this.emit(next, "workspace.updated");
   }
 
-  private buildCommand(
+  private buildMaterializationPlan(
     workspace: ConversationWorkspace,
     execution: {
       readonly mode: "create" | "reuse" | "fork";
@@ -636,20 +666,60 @@ export class WorkspaceService {
       readonly threadId: string;
       readonly messageId: string;
     },
-  ): Record<string, unknown> {
+  ): MaterializationPlan {
     const draft = workspace.draft;
-    const prompt = draft.providerPrompt ?? draft.goal;
-    if (prompt === null || prompt.trim().length === 0) {
-      throw new WorkspaceError("draft_incomplete");
-    }
+    const prompt = compileProviderPrompt(draft, workspace.evidenceRefs);
     const runtimeMode = draft.runtimeMode ?? "approval-required";
     const interactionMode = draft.interactionMode ?? "default";
-    if (execution.mode === "reuse" || execution.mode === "fork") {
+    if (execution.mode === "fork") {
+      const targetThreadId = draft.targetThreadId ?? workspace.activeThreadId;
+      if (targetThreadId === null || targetThreadId === execution.threadId) {
+        throw new WorkspaceError("draft_incomplete");
+      }
+      const request = {
+        commandId: execution.commandId,
+        threadId: execution.threadId,
+        messageId: execution.messageId,
+        title: (draft.goal ?? "Independent investigation").slice(0, 300),
+        text: prompt,
+        ...(draft.modelSelection === null ? {} : { modelSelection: draft.modelSelection }),
+        runtimeMode: asRuntimeMode(runtimeMode),
+        interactionMode: asInteractionMode(interactionMode),
+      };
+      return { kind: "fork", sourceThreadId: targetThreadId, request };
+    }
+    if (execution.mode === "reuse") {
       const targetThreadId = draft.targetThreadId ?? workspace.activeThreadId;
       if (targetThreadId === null || targetThreadId !== execution.threadId) {
         throw new WorkspaceError("draft_incomplete");
       }
       return {
+        kind: "canonical",
+        command: {
+          type: "thread.turn.start",
+          commandId: execution.commandId,
+          threadId: execution.threadId,
+          message: {
+            messageId: execution.messageId,
+            role: "user",
+            text: prompt,
+            attachments: [],
+          },
+          ...(draft.modelSelection === null ? {} : { modelSelection: draft.modelSelection }),
+          runtimeMode,
+          interactionMode,
+          createdAt: nowIso(),
+        },
+      };
+    }
+    if (draft.targetProjectId === null || draft.modelSelection === null) {
+      throw new WorkspaceError("draft_incomplete");
+    }
+    // Atomic bootstrap: thread plus first turn in one canonical command; a
+    // failed first turn never leaves an empty session behind.
+    return {
+      kind: "canonical",
+      command: {
         type: "thread.turn.start",
         commandId: execution.commandId,
         threadId: execution.threadId,
@@ -659,45 +729,37 @@ export class WorkspaceService {
           text: prompt,
           attachments: [],
         },
-        ...(draft.modelSelection === null ? {} : { modelSelection: draft.modelSelection }),
+        modelSelection: draft.modelSelection,
         runtimeMode,
         interactionMode,
-        createdAt: nowIso(),
-      };
-    }
-    if (draft.targetProjectId === null || draft.modelSelection === null) {
-      throw new WorkspaceError("draft_incomplete");
-    }
-    // Atomic bootstrap: thread plus first turn in one canonical command; a
-    // failed first turn never leaves an empty session behind.
-    return {
-      type: "thread.turn.start",
-      commandId: execution.commandId,
-      threadId: execution.threadId,
-      message: {
-        messageId: execution.messageId,
-        role: "user",
-        text: prompt,
-        attachments: [],
-      },
-      modelSelection: draft.modelSelection,
-      runtimeMode,
-      interactionMode,
-      ...(draft.goal === null ? {} : { titleSeed: draft.goal.slice(0, 120) }),
-      bootstrap: {
-        createThread: {
-          projectId: draft.targetProjectId,
-          title: draft.goal?.slice(0, 200) ?? "Conversation task",
-          modelSelection: draft.modelSelection,
-          runtimeMode,
-          interactionMode,
-          branch: draft.branch,
-          worktreePath: draft.worktreeIntent,
-          createdAt: nowIso(),
+        ...(draft.goal === null ? {} : { titleSeed: draft.goal.slice(0, 120) }),
+        bootstrap: {
+          createThread: {
+            projectId: draft.targetProjectId,
+            title: draft.goal?.slice(0, 200) ?? "Conversation task",
+            modelSelection: draft.modelSelection,
+            runtimeMode,
+            interactionMode,
+            branch: draft.branch,
+            // A conversational worktree intent is not a filesystem path. Only
+            // an explicit absolute path may enter the canonical command; other
+            // intents remain part of the provider prompt for T3 to resolve.
+            worktreePath:
+              draft.worktreeIntent?.startsWith("/") === true ? draft.worktreeIntent : null,
+            createdAt: nowIso(),
+          },
         },
+        createdAt: nowIso(),
       },
-      createdAt: nowIso(),
     };
+  }
+
+  private receiptForMaterialization(execution: {
+    readonly mode: "create" | "reuse" | "fork";
+    readonly commandId: string;
+  }) {
+    if (execution.mode !== "fork") return this.commands.receiptFor(execution.commandId);
+    return this.commands.receiptFor(childCommandId(execution.commandId, "turn"));
   }
 
   private activeThread(workspace: ConversationWorkspace) {
@@ -796,6 +858,79 @@ export class WorkspaceService {
     NodeFS.renameSync(tempPath, this.filePath);
   }
 }
+
+const compileProviderPrompt = (
+  draft: TaskDraft,
+  evidenceRefs: ReadonlyArray<EvidenceRef>,
+): string => {
+  const primary = draft.providerPrompt?.trim() || draft.goal?.trim();
+  if (primary === undefined || primary.length === 0) throw new WorkspaceError("draft_incomplete");
+
+  const sections: string[] = [`Auftrag:\n${primary}`];
+  const addText = (heading: string, value: string | null): void => {
+    const normalized = value?.trim();
+    if (normalized !== undefined && normalized.length > 0) {
+      sections.push(`${heading}:\n${normalized}`);
+    }
+  };
+  const addList = (heading: string, values: ReadonlyArray<string>): void => {
+    const normalized = values.map((value) => value.trim()).filter((value) => value.length > 0);
+    if (normalized.length > 0)
+      sections.push(`${heading}:\n${normalized.map((v) => `- ${v}`).join("\n")}`);
+  };
+
+  if (draft.providerPrompt !== null && draft.goal !== null && draft.goal.trim() !== primary) {
+    addText("Ziel", draft.goal);
+  }
+  addText("Hintergrund", draft.background);
+  addList("Umfang", draft.scope);
+  addList("Randbedingungen", draft.constraints);
+  addList("Akzeptanzkriterien", draft.acceptanceCriteria);
+  addList("Noch offene Entscheidungen", draft.unresolvedDecisions);
+  addList("Bekannte Risiken", draft.riskFlags);
+  addText("Branch-Wunsch", draft.branch);
+  if (draft.worktreeIntent?.startsWith("/") !== true) {
+    addText("Worktree-Wunsch", draft.worktreeIntent);
+  }
+
+  const decisions = draft.decisionLog
+    .slice(-20)
+    .map((decision) => `- [${decision.source}] ${decision.text.trim()}`)
+    .filter((line) => !line.endsWith("] "));
+  if (decisions.length > 0) sections.push(`Besprochene Entscheidungen:\n${decisions.join("\n")}`);
+
+  const references = evidenceRefs.slice(-20).map((reference) => {
+    const locator = [reference.threadId, reference.itemId, reference.cursor]
+      .filter((value): value is string => value !== undefined)
+      .join(":");
+    return `- ${reference.kind}${locator.length === 0 ? "" : ` ${locator}`}`;
+  });
+  if (references.length > 0) sections.push(`T3-Evidenzreferenzen:\n${references.join("\n")}`);
+
+  return sections.join("\n\n").slice(0, 120_000);
+};
+
+const asRuntimeMode = (
+  value: string,
+): "approval-required" | "auto-accept-edits" | "auto" | "full-access" => {
+  if (
+    value === "approval-required" ||
+    value === "auto-accept-edits" ||
+    value === "auto" ||
+    value === "full-access"
+  ) {
+    return value;
+  }
+  throw new WorkspaceError("draft_incomplete");
+};
+
+const asInteractionMode = (value: string): "default" | "plan" => {
+  if (value === "default" || value === "plan") return value;
+  throw new WorkspaceError("draft_incomplete");
+};
+
+const childCommandId = (commandId: string, suffix: string): string =>
+  `${commandId.slice(0, Math.max(1, 159 - suffix.length))}:${suffix}`;
 
 const sha256 = (value: string): string =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");

@@ -77,8 +77,6 @@ export class ConsultationService {
   private readonly t3: T3Client;
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly unsubscribers = new Map<string, () => void>();
-  /** Consultations whose hide-archive must retry once the shell catches up. */
-  private readonly archivePending = new Set<string>();
 
   constructor(
     store: BridgeStore,
@@ -91,6 +89,22 @@ export class ConsultationService {
     this.t3 = t3;
     this.filePath = filePath;
     this.state = this.load();
+    for (const run of this.state.runs) {
+      if (run.status !== "running") continue;
+      this.t3.retainThread(run.threadId);
+      this.watchForCompletion(run, DEFAULT_TIMEOUT_MS);
+      const current = this.store.snapshot().threads.find((thread) => thread.id === run.threadId);
+      if (current?.status === "completed") {
+        void this.completeFromThread(run.consultationId, run.threadId);
+      } else if (current?.status === "failed") {
+        void this.finishSafely(run.consultationId, {
+          status: "failed",
+          answer: null,
+          evidence: [],
+          failureReason: "provider_failed",
+        });
+      }
+    }
   }
 
   list(): ReadonlyArray<ConsultationRun> {
@@ -207,18 +221,54 @@ export class ConsultationService {
       return failed;
     }
 
+    const observed = await this.awaitThread(threadId, 3_000);
+    if (!observed) {
+      return this.record({
+        schemaVersion: 1,
+        consultationId: request.consultationId,
+        workspaceId: request.workspaceId ?? null,
+        projectId,
+        sourceThreadId: sourceThread?.id ?? null,
+        threadId,
+        question: request.question,
+        modelSelection,
+        status: "failed",
+        answer: null,
+        evidence: [],
+        failureReason: "archive_target_not_observed",
+        startedAt,
+        completedAt: nowIso(),
+        expiresAt: isoFromEpochMillis(nowEpochMillis() + EXPIRY_MS),
+      });
+    }
     const archiveCommand = await decodeCanonicalCommand({
       type: "thread.archive",
       commandId: `${request.consultationId}:archive`,
       threadId,
     });
-    // Archive failures are tolerated (the consultation still works, merely
-    // visible) and retried once the shell projection catches up.
-    await this.commands
-      .canonical(archiveCommand, { consultationId: request.consultationId, stage: "archive" })
-      .catch(() => {
-        this.archivePending.add(request.consultationId);
+    const archiveResult = await this.commands.canonical(archiveCommand, {
+      consultationId: request.consultationId,
+      stage: "archive",
+    });
+    if (archiveResult.receipt.status !== "accepted") {
+      return this.record({
+        schemaVersion: 1,
+        consultationId: request.consultationId,
+        workspaceId: request.workspaceId ?? null,
+        projectId,
+        sourceThreadId: sourceThread?.id ?? null,
+        threadId,
+        question: request.question,
+        modelSelection,
+        status: "failed",
+        answer: null,
+        evidence: [],
+        failureReason: archiveResult.receipt.reasonCode ?? "archive_rejected",
+        startedAt,
+        completedAt: nowIso(),
+        expiresAt: isoFromEpochMillis(nowEpochMillis() + EXPIRY_MS),
       });
+    }
 
     const run = this.record({
       schemaVersion: 1,
@@ -275,10 +325,6 @@ export class ConsultationService {
     this.timers.set(run.consultationId, timer);
     const unsubscribe = this.store.subscribe((event) => {
       if (event.threadId !== run.threadId) return;
-      if (this.archivePending.has(run.consultationId)) {
-        this.archivePending.delete(run.consultationId);
-        void this.retryArchive(run);
-      }
       const status = (event.payload as { readonly status?: string }).status;
       if (status === "completed") {
         void this.completeFromThread(run.consultationId, run.threadId);
@@ -294,20 +340,22 @@ export class ConsultationService {
     this.unsubscribers.set(run.consultationId, unsubscribe);
   }
 
-  private async retryArchive(run: ConsultationRun): Promise<void> {
-    try {
-      const archive = await decodeCanonicalCommand({
-        type: "thread.archive",
-        commandId: `${run.consultationId}:archive-retry`,
-        threadId: run.threadId,
+  private async awaitThread(threadId: string, timeoutMs: number): Promise<boolean> {
+    if (this.store.snapshot().threads.some((thread) => thread.id === threadId)) return true;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(value);
+      };
+      const unsubscribe = this.store.subscribe((event) => {
+        if (event.threadId === threadId) finish(true);
       });
-      await this.commands.canonical(archive, {
-        consultationId: run.consultationId,
-        stage: "archive-retry",
-      });
-    } catch {
-      this.archivePending.add(run.consultationId);
-    }
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
   }
 
   private async completeFromThread(consultationId: string, threadId: string): Promise<void> {
@@ -470,16 +518,7 @@ export class ConsultationService {
         "schemaVersion" in parsed &&
         parsed.schemaVersion === 1
       ) {
-        // Runs that were running when the process died are unknowable now.
-        const state = parsed as PersistedConsultations;
-        return {
-          ...state,
-          runs: state.runs.map((run) =>
-            run.status === "running"
-              ? { ...run, status: "failed", failureReason: "bridge_restarted" }
-              : run,
-          ),
-        };
+        return parsed as PersistedConsultations;
       }
     } catch {
       return empty;

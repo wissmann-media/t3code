@@ -78,6 +78,15 @@ const fakeT3 = (
       dispatched.push(command);
       return { sequence: dispatched.length };
     },
+    threadOutput: async (threadId: string) => ({
+      threadId,
+      projectId: "project-1",
+      assistantText: "The source recommends option B.",
+      createdAt: "2026-08-03T10:00:00Z",
+      truncated: false,
+      freshness: "live",
+      ownership: "t3code",
+    }),
     connected: () => true,
   }) as unknown as T3Client;
 
@@ -199,6 +208,92 @@ describe("Conversation workspace and task draft", () => {
       threadId: "thread-new",
       bootstrap: { createThread: { projectId: "project-1" } },
       titleSeed: "Improve the Morningstar importer",
+    });
+  });
+
+  it("compiles the complete draft into a provider-ready prompt", async () => {
+    const { service, dispatched } = makeService();
+    const created = service.create("workspace-prompt", "client");
+    const patched = service.patch("workspace-prompt", created.revision, "op-draft", {
+      draft: {
+        goal: "Refactor the importer",
+        background: "The current implementation grew organically.",
+        scope: ["XML download", "Parsing"],
+        constraints: ["Keep the public API stable"],
+        targetProjectId: "project-1",
+        modelSelection: { instanceId: "codex-default", model: "gpt-test" },
+        acceptanceCriteria: ["All importer tests pass"],
+        riskFlags: ["Preserve idempotency"],
+        providerPrompt: null,
+      },
+      decision: {
+        at: "2026-08-03T10:00:00Z",
+        source: "user",
+        text: "Use incremental checkpoints",
+      },
+    });
+
+    await service.materialize(
+      "workspace-prompt",
+      patched.revision,
+      "op-materialize",
+      { utterance: "Setz das um.", draftRevision: patched.draft.draftRevision },
+      {
+        mode: "create",
+        commandId: "command-prompt",
+        threadId: "thread-prompt",
+        messageId: "message-prompt",
+      },
+    );
+
+    expect(dispatched[0]).toMatchObject({
+      type: "thread.turn.start",
+      message: {
+        text: expect.stringContaining("Akzeptanzkriterien:\n- All importer tests pass"),
+      },
+    });
+    expect(JSON.stringify(dispatched[0])).toContain("Use incremental checkpoints");
+    expect(JSON.stringify(dispatched[0])).toContain("Keep the public API stable");
+  });
+
+  it("materializes an independent investigation as a contextual fork", async () => {
+    const { service, dispatched, store } = makeService();
+    const created = service.create("workspace-fork", "client");
+    const patched = service.patch("workspace-fork", created.revision, "op-draft", {
+      activeProjectId: "project-1",
+      activeThreadId: "thread-1",
+      draft: {
+        ...readyDraftPatch.draft,
+        sessionStrategy: "fork",
+        targetThreadId: "thread-1",
+      },
+    });
+
+    const outcome = await service.materialize(
+      "workspace-fork",
+      patched.revision,
+      "op-fork",
+      { utterance: "Untersuche das unabhängig.", draftRevision: patched.draft.draftRevision },
+      {
+        mode: "fork",
+        commandId: "command-fork",
+        threadId: "thread-fork",
+        messageId: "message-fork",
+      },
+    );
+
+    expect(outcome.workspace.activeThreadId).toBe("thread-fork");
+    expect(outcome.workspace.linkedExecutions.at(-1)?.mode).toBe("fork");
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[0]).toMatchObject({ type: "thread.create", threadId: "thread-fork" });
+    expect(dispatched[1]).toMatchObject({
+      type: "thread.turn.start",
+      threadId: "thread-fork",
+      message: { text: expect.stringContaining("Latest source-thread assistant output") },
+    });
+    expect(store.snapshot().threadLineage["thread-fork"]).toEqual({
+      forkedFromThreadId: "thread-1",
+      forkMode: "contextual",
     });
   });
 
