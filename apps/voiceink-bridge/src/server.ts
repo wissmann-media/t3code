@@ -123,7 +123,16 @@ export const createBridgeServer = (options: {
         return;
       }
       if (Schema.isSchemaError(error)) {
-        logRequestFailure(request, "invalid request", error);
+        // Field paths make a malformed command diagnosable; values never
+        // reach the log.
+        const paths = [...String(error.message ?? "").matchAll(/\[\"([A-Za-z0-9_]+)\"\]/g)]
+          .map((match) => match[1])
+          .slice(0, 8);
+        logRequestFailure(
+          request,
+          paths.length > 0 ? `invalid request at ${paths.join(".")}` : "invalid request",
+          error,
+        );
         sendJson(response, 422, { error: "invalid_request" });
         return;
       }
