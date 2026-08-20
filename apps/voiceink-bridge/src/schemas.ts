@@ -169,6 +169,10 @@ const WorkspaceDraftPatch = Schema.Struct({
 export const WorkspacePatchRequest = Schema.Struct({
   expectedRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   operationId: CommandId,
+  // Starting a genuinely new topic must not merge with the previous task
+  // draft. This is deliberately one atomic patch operation so concurrent
+  // clients can never observe a half-cleared draft.
+  resetDraft: Schema.optional(Schema.Boolean),
   activeProjectId: Schema.optional(Schema.NullOr(Identifier)),
   activeThreadId: Schema.optional(Schema.NullOr(Identifier)),
   referencedThreadIds: Schema.optional(Schema.Array(Identifier).check(Schema.isMaxLength(32))),

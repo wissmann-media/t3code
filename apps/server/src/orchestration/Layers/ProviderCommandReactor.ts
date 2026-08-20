@@ -1142,19 +1142,6 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
-    if (!hasSession) {
-      return yield* appendProviderFailureActivity({
-        threadId: event.payload.threadId,
-        kind: "provider.approval.respond.failed",
-        summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
-        turnId: null,
-        createdAt: event.payload.createdAt,
-        requestId: event.payload.requestId,
-      });
-    }
-
     yield* providerService
       .respondToRequest({
         threadId: event.payload.threadId,
@@ -1186,19 +1173,6 @@ const make = Effect.gen(function* () {
       if (!thread) {
         return;
       }
-      const hasSession = thread.session && thread.session.status !== "stopped";
-      if (!hasSession) {
-        return yield* appendProviderFailureActivity({
-          threadId: event.payload.threadId,
-          kind: "provider.user-input.respond.failed",
-          summary: "Provider user input response failed",
-          detail: "No active provider session is bound to this thread.",
-          turnId: null,
-          createdAt: event.payload.createdAt,
-          requestId: event.payload.requestId,
-        });
-      }
-
       yield* providerService
         .respondToUserInput({
           threadId: event.payload.threadId,

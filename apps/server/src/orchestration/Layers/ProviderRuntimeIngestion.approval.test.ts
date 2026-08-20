@@ -30,4 +30,29 @@ describe("runtimeEventToActivities approval details", () => {
     expect(activity?.kind).toBe("approval.requested");
     expect((activity?.payload as Record<string, unknown> | undefined)?.detail).toBe(detail);
   });
+
+  it("projects provider-specific permissions as actionable tool approvals", () => {
+    const event = {
+      type: "request.opened",
+      eventId: EventId.make("evt-tool-request-opened"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-08-04T15:10:46.305Z",
+      threadId: ThreadId.make("thread-up45"),
+      requestId: RuntimeRequestId.make("per-plan-governance"),
+      payload: {
+        requestType: "unknown",
+        detail: "plan-governance",
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const [activity] = runtimeEventToActivities(event);
+
+    expect(activity?.summary).toBe("Tool approval requested");
+    expect(activity?.payload).toMatchObject({
+      requestId: "per-plan-governance",
+      requestKind: "tool",
+      requestType: "unknown",
+      detail: "plan-governance",
+    });
+  });
 });

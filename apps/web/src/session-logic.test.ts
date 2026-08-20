@@ -117,6 +117,32 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("keeps provider-specific permissions actionable", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-tool-permission",
+        createdAt: "2026-08-04T15:10:46.305Z",
+        kind: "approval.requested",
+        summary: "Approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "per-plan-governance",
+          requestType: "unknown",
+          detail: "plan-governance",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "per-plan-governance",
+        requestKind: "tool",
+        createdAt: "2026-08-04T15:10:46.305Z",
+        detail: "plan-governance",
+      },
+    ]);
+  });
+
   it("clears stale pending approvals when provider reports unknown pending request", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

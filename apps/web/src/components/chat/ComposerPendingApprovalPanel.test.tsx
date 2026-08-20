@@ -25,4 +25,22 @@ describe("ComposerPendingApprovalPanel", () => {
     expect(markup).not.toContain("truncate");
     expect(markup).not.toContain("line-clamp");
   });
+
+  it("labels provider-specific permissions without pretending they are commands", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerPendingApprovalPanel
+        approval={{
+          requestId: ApprovalRequestId.make("approval-tool"),
+          requestKind: "tool",
+          createdAt: "2026-08-04T15:10:46.305Z",
+          detail: "plan-governance",
+        }}
+        pendingCount={1}
+      />,
+    );
+
+    expect(markup).toContain("Tool approval requested");
+    expect(markup).toContain('aria-label="Tool or permission"');
+    expect(markup).toContain("plan-governance");
+  });
 });

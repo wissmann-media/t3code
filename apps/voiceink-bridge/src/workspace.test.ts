@@ -183,6 +183,62 @@ describe("Conversation workspace and task draft", () => {
     expect(replay.draft.goal).toBe("Original");
   });
 
+  it("resets a new topic atomically without inheriting draft content or model options", () => {
+    const { service } = makeService();
+    const created = service.create("workspace-reset", "client");
+    const contaminated = service.patch("workspace-reset", created.revision, "op-old-topic", {
+      activeProjectId: "old-project",
+      activeThreadId: "old-thread",
+      pendingQuestions: ["old question"],
+      draft: {
+        goal: "Old goal",
+        background: "Private conversation from another topic",
+        scope: ["Morningstar import"],
+        constraints: ["Planning only"],
+        targetProjectId: "old-project",
+        targetThreadId: "old-thread",
+        sessionStrategy: "reuse",
+        modelSelection: {
+          instanceId: "claude-old",
+          model: "claude-old",
+          options: [{ id: "effort", value: "high" }],
+        },
+        providerPrompt: "Continue the old task.",
+      },
+      decision: {
+        at: "2026-08-05T18:00:00Z",
+        source: "user",
+        text: "Old decision",
+      },
+    });
+
+    const fresh = service.patch("workspace-reset", contaminated.revision, "op-new-topic", {
+      resetDraft: true,
+      activeProjectId: "project-1",
+      activeThreadId: null,
+      pendingQuestions: [],
+      draft: {
+        targetProjectId: "project-1",
+        targetThreadId: null,
+        sessionStrategy: "create",
+      },
+    });
+
+    expect(fresh.activeProjectId).toBe("project-1");
+    expect(fresh.activeThreadId).toBeNull();
+    expect(fresh.pendingQuestions).toEqual([]);
+    expect(fresh.draft.draftRevision).toBe(contaminated.draft.draftRevision + 1);
+    expect(fresh.draft.targetProjectId).toBe("project-1");
+    expect(fresh.draft.sessionStrategy).toBe("create");
+    expect(fresh.draft.goal).toBeNull();
+    expect(fresh.draft.background).toBeNull();
+    expect(fresh.draft.scope).toEqual([]);
+    expect(fresh.draft.constraints).toEqual([]);
+    expect(fresh.draft.modelSelection).toBeNull();
+    expect(fresh.draft.providerPrompt).toBeNull();
+    expect(fresh.draft.decisionLog).toEqual([]);
+  });
+
   it("materializes an approved draft atomically via bootstrap and links the execution", async () => {
     const { service, dispatched } = makeService();
     const created = service.create("workspace-5", "client");
@@ -201,6 +257,9 @@ describe("Conversation workspace and task draft", () => {
     );
     expect(outcome.result.receipt.status).toBe("accepted");
     expect(outcome.workspace.state).toBe("executing");
+    expect(outcome.workspace.activeThreadId).toBe("thread-new");
+    expect(outcome.workspace.draft.targetThreadId).toBe("thread-new");
+    expect(outcome.workspace.draft.sessionStrategy).toBe("reuse");
     expect(outcome.workspace.linkedExecutions).toHaveLength(1);
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]).toMatchObject({
@@ -211,7 +270,7 @@ describe("Conversation workspace and task draft", () => {
     });
   });
 
-  it("compiles the complete draft into a provider-ready prompt", async () => {
+  it("compiles only current structured draft fields into a provider-ready prompt", async () => {
     const { service, dispatched } = makeService();
     const created = service.create("workspace-prompt", "client");
     const patched = service.patch("workspace-prompt", created.revision, "op-draft", {
@@ -252,8 +311,62 @@ describe("Conversation workspace and task draft", () => {
         text: expect.stringContaining("Akzeptanzkriterien:\n- All importer tests pass"),
       },
     });
-    expect(JSON.stringify(dispatched[0])).toContain("Use incremental checkpoints");
     expect(JSON.stringify(dispatched[0])).toContain("Keep the public API stable");
+    expect(JSON.stringify(dispatched[0])).not.toContain("Use incremental checkpoints");
+  });
+
+  it("sends an explicit provider prompt verbatim without workspace history", async () => {
+    const { service, dispatched } = makeService();
+    const created = service.create("workspace-isolated-prompt", "client");
+    const patched = service.patch(
+      "workspace-isolated-prompt",
+      created.revision,
+      "op-isolated-draft",
+      {
+        evidenceRefs: [
+          {
+            kind: "old-thread",
+            threadId: "thread-from-another-project",
+            retrievedAt: "2026-08-05T18:00:00Z",
+          },
+        ],
+        draft: {
+          goal: "Lokalen Stack starten",
+          background: "Unrelated private conversation",
+          constraints: ["Unrelated planning-only constraint"],
+          targetProjectId: "project-1",
+          modelSelection: { instanceId: "codex-default", model: "gpt-test" },
+          providerPrompt: "Starte den lokalen Stack und melde den Status.",
+        },
+        decision: {
+          at: "2026-08-05T18:00:00Z",
+          source: "user",
+          text: "Unrelated old decision",
+        },
+      },
+    );
+
+    await service.materialize(
+      "workspace-isolated-prompt",
+      patched.revision,
+      "op-isolated-materialize",
+      { utterance: "Leg die Session an.", draftRevision: patched.draft.draftRevision },
+      {
+        mode: "create",
+        commandId: "command-isolated",
+        threadId: "thread-isolated",
+        messageId: "message-isolated",
+      },
+    );
+
+    expect(dispatched[0]).toMatchObject({
+      type: "thread.turn.start",
+      message: { text: "Starte den lokalen Stack und melde den Status." },
+    });
+    expect(JSON.stringify(dispatched[0])).not.toContain("private conversation");
+    expect(JSON.stringify(dispatched[0])).not.toContain("planning-only");
+    expect(JSON.stringify(dispatched[0])).not.toContain("old decision");
+    expect(JSON.stringify(dispatched[0])).not.toContain("another-project");
   });
 
   it("materializes an independent investigation as a contextual fork", async () => {

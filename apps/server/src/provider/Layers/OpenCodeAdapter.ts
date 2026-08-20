@@ -315,9 +315,13 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
   return "dynamic_tool_call";
 }
 
-function mapPermissionToRequestType(
+export function mapPermissionToRequestType(
   permission: string,
-): "command_execution_approval" | "file_read_approval" | "file_change_approval" | "unknown" {
+):
+  | "command_execution_approval"
+  | "file_read_approval"
+  | "file_change_approval"
+  | "dynamic_tool_call" {
   switch (permission) {
     case "bash":
       return "command_execution_approval";
@@ -326,7 +330,7 @@ function mapPermissionToRequestType(
     case "edit":
       return "file_change_approval";
     default:
-      return "unknown";
+      return "dynamic_tool_call";
   }
 }
 
@@ -1562,14 +1566,26 @@ export function makeOpenCodeAdapter(
       "respondToRequest",
     )(function* (threadId, requestId, decision) {
       const context = yield* ensureSessionContext(sessions, threadId);
-      if (!context.pendingPermissions.has(requestId)) {
+      const knownPermission = context.pendingPermissions.get(requestId);
+      const permission = knownPermission
+        ? knownPermission
+        : yield* runOpenCodeSdk("permission.list", () => context.client.permission.list()).pipe(
+            Effect.map((response) =>
+              response.data?.find(
+                (candidate) =>
+                  candidate.id === requestId && candidate.sessionID === context.openCodeSessionId,
+              ),
+            ),
+            Effect.mapError(toRequestError),
+          );
+      if (!permission) {
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "permission.reply",
           detail: `Unknown pending permission request: ${requestId}`,
         });
       }
-
+      context.pendingPermissions.set(requestId, permission);
       yield* runOpenCodeSdk("permission.reply", () =>
         context.client.permission.reply({
           requestID: requestId,

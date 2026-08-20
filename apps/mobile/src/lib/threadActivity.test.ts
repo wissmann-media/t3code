@@ -13,10 +13,39 @@ import {
 
 import {
   buildThreadFeed,
+  derivePendingApprovals,
   deriveThreadFeedPresentation,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
+
+describe("derivePendingApprovals", () => {
+  it("keeps provider-specific permissions actionable", () => {
+    const activities = [
+      makeActivity({
+        id: EventId.make("approval-open-tool-permission"),
+        createdAt: "2026-08-04T15:10:46.305Z",
+        kind: "approval.requested",
+        summary: "Approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "per-plan-governance",
+          requestType: "unknown",
+          detail: "plan-governance",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "per-plan-governance",
+        requestKind: "tool",
+        createdAt: "2026-08-04T15:10:46.305Z",
+        detail: "plan-governance",
+      },
+    ]);
+  });
+});
 
 function makeActivity(
   input: Partial<OrchestrationThreadActivity> &

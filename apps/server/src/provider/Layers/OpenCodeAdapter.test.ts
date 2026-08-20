@@ -16,6 +16,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { beforeEach } from "vite-plus/test";
 
 import {
+  ApprovalRequestId,
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -36,6 +37,7 @@ import {
   isOpenCodeNotFound,
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
+  mapPermissionToRequestType,
   mergeOpenCodeAssistantText,
 } from "./OpenCodeAdapter.ts";
 
@@ -73,6 +75,15 @@ const runtimeMock = {
     transientErrorSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
+    pendingPermissionRequests: [] as Array<{
+      id: string;
+      sessionID: string;
+      permission: string;
+      patterns: string[];
+      metadata: Record<string, unknown>;
+      always: string[];
+    }>,
+    permissionReplyCalls: [] as Array<{ requestID: string; reply: string }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
   },
   reset() {
@@ -93,6 +104,8 @@ const runtimeMock = {
     this.state.transientErrorSessionIds.clear();
     this.state.sessionDirectoryById.clear();
     this.state.sessionUpdateCalls.length = 0;
+    this.state.pendingPermissionRequests.length = 0;
+    this.state.permissionReplyCalls.length = 0;
     this.state.forkCalls.length = 0;
   },
 };
@@ -211,6 +224,12 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             }
           })(),
         }),
+      },
+      permission: {
+        list: async () => ({ data: runtimeMock.state.pendingPermissionRequests }),
+        reply: async ({ requestID, reply }: { requestID: string; reply: string }) => {
+          runtimeMock.state.permissionReplyCalls.push({ requestID, reply });
+        },
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
   loadOpenCodeInventory: () =>
@@ -482,6 +501,36 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(runtimeMock.state.sessionUpdateCalls.length, 1);
       NodeAssert.equal(runtimeMock.state.sessionUpdateCalls[0]?.sessionID, "ses_perms");
       NodeAssert.equal(runtimeMock.state.sessionUpdateCalls[0]?.permission != null, true);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("forwards persisted permission ids after the adapter resumes", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-persisted-permission");
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        runtimeMode: "approval-required",
+        threadId,
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_persisted_permission" },
+      });
+      runtimeMock.state.pendingPermissionRequests.push({
+        id: "per_persisted",
+        sessionID: "ses_persisted_permission",
+        permission: "skill",
+        patterns: ["plan-governance"],
+        metadata: {},
+        always: [],
+      });
+
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("per_persisted"), "accept");
+
+      NodeAssert.deepEqual(runtimeMock.state.permissionReplyCalls, [
+        { requestID: "per_persisted", reply: "once" },
+      ]);
 
       yield* adapter.stopSession(threadId);
     }),
@@ -1026,6 +1075,13 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(isOpenCodeNotFound({ cause: { response: { status: 401 } } }), false);
       NodeAssert.equal(isOpenCodeNotFound(new Error("network error (no response)")), false);
       NodeAssert.equal(isOpenCodeNotFound(undefined), false);
+    }),
+  );
+
+  it.effect("classifies provider-specific permissions as actionable tool approvals", () =>
+    Effect.sync(() => {
+      NodeAssert.equal(mapPermissionToRequestType("skill"), "dynamic_tool_call");
+      NodeAssert.equal(mapPermissionToRequestType("bash"), "command_execution_approval");
     }),
   );
 

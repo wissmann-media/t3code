@@ -1883,6 +1883,7 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (workEntry.requestKind === "command") return "terminal";
   if (workEntry.requestKind === "file-read") return "eye";
   if (workEntry.requestKind === "file-change") return "square-pen";
+  if (workEntry.requestKind === "tool") return "wrench";
 
   if (workEntry.itemType === "command_execution" || workEntry.command) {
     return "terminal";

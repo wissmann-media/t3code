@@ -145,6 +145,7 @@ type DraftPatchFields = {
 };
 
 export interface WorkspacePatch {
+  readonly resetDraft?: boolean;
   readonly activeProjectId?: string | null;
   readonly activeThreadId?: string | null;
   readonly referencedThreadIds?: ReadonlyArray<string>;
@@ -293,22 +294,24 @@ export class WorkspaceService {
     const workspace = this.get(workspaceId);
     if (workspace.revision !== expectedRevision) throw new WorkspaceError("stale_revision");
 
-    const draftChanged = patch.draft !== undefined || patch.decision !== undefined;
+    const resetsDraft = patch.resetDraft === true;
+    const draftChanged = resetsDraft || patch.draft !== undefined || patch.decision !== undefined;
     // Absent (undefined) patch fields never clobber existing draft values;
     // explicit null clears a field.
     const providedDraftFields = Object.fromEntries(
       Object.entries(patch.draft ?? {}).filter(([, value]) => value !== undefined),
     );
+    const baseDraft = resetsDraft ? emptyDraft() : workspace.draft;
     const draft: TaskDraft = {
-      ...workspace.draft,
+      ...baseDraft,
       ...providedDraftFields,
       draftRevision: draftChanged
         ? workspace.draft.draftRevision + 1
         : workspace.draft.draftRevision,
       decisionLog:
         patch.decision === undefined
-          ? workspace.draft.decisionLog
-          : [...workspace.draft.decisionLog, patch.decision].slice(-100),
+          ? baseDraft.decisionLog
+          : [...baseDraft.decisionLog, patch.decision].slice(-100),
     };
     const next: ConversationWorkspace = {
       ...workspace,
@@ -459,7 +462,17 @@ export class WorkspaceService {
       ...workspace,
       revision: workspace.revision + 1,
       state: "executing",
+      activeProjectId: workspace.activeProjectId ?? draft.targetProjectId,
       activeThreadId: execution.threadId,
+      draft: {
+        ...draft,
+        // After the atomic first turn succeeds, the new thread is the
+        // conversation's authoritative continuation target. Leaving the
+        // pre-execution `create` strategy behind would make the next spoken
+        // follow-up create another thread instead of continuing this one.
+        targetThreadId: execution.threadId,
+        sessionStrategy: "reuse",
+      },
       linkedExecutions: [...workspace.linkedExecutions, linked],
       updatedAt: nowIso(),
     };
@@ -668,7 +681,7 @@ export class WorkspaceService {
     },
   ): MaterializationPlan {
     const draft = workspace.draft;
-    const prompt = compileProviderPrompt(draft, workspace.evidenceRefs);
+    const prompt = compileProviderPrompt(draft);
     const runtimeMode = draft.runtimeMode ?? "approval-required";
     const interactionMode = draft.interactionMode ?? "default";
     if (execution.mode === "fork") {
@@ -859,12 +872,14 @@ export class WorkspaceService {
   }
 }
 
-const compileProviderPrompt = (
-  draft: TaskDraft,
-  evidenceRefs: ReadonlyArray<EvidenceRef>,
-): string => {
+const compileProviderPrompt = (draft: TaskDraft): string => {
   const primary = draft.providerPrompt?.trim() || draft.goal?.trim();
   if (primary === undefined || primary.length === 0) throw new WorkspaceError("draft_incomplete");
+
+  // providerPrompt is the already compiled, standalone instruction. It is a
+  // strict trust boundary: internal workspace history, evidence locators and
+  // decision-log entries must never be appended to a fresh T3 session.
+  if (draft.providerPrompt?.trim()) return primary.slice(0, 20_000);
 
   const sections: string[] = [`Auftrag:\n${primary}`];
   const addText = (heading: string, value: string | null): void => {
@@ -893,21 +908,7 @@ const compileProviderPrompt = (
     addText("Worktree-Wunsch", draft.worktreeIntent);
   }
 
-  const decisions = draft.decisionLog
-    .slice(-20)
-    .map((decision) => `- [${decision.source}] ${decision.text.trim()}`)
-    .filter((line) => !line.endsWith("] "));
-  if (decisions.length > 0) sections.push(`Besprochene Entscheidungen:\n${decisions.join("\n")}`);
-
-  const references = evidenceRefs.slice(-20).map((reference) => {
-    const locator = [reference.threadId, reference.itemId, reference.cursor]
-      .filter((value): value is string => value !== undefined)
-      .join(":");
-    return `- ${reference.kind}${locator.length === 0 ? "" : ` ${locator}`}`;
-  });
-  if (references.length > 0) sections.push(`T3-Evidenzreferenzen:\n${references.join("\n")}`);
-
-  return sections.join("\n\n").slice(0, 120_000);
+  return sections.join("\n\n").slice(0, 20_000);
 };
 
 const asRuntimeMode = (

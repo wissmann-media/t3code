@@ -83,6 +83,13 @@ The most common defect in this repo is a change that works on the path you teste
 - The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to.
 - Stop what you started, by the PID you tracked. See rule 1.
 
+## Upstream preflight for fork work
+
+- Before changing T3 Code on a fork branch, fetch `upstream` and compare the relevant paths against `upstream/main`. Check whether the issue was already fixed or the surrounding implementation changed before writing a second solution.
+- Prefer `git fetch upstream --prune`, followed by a targeted `git log HEAD..upstream/main -- <paths>` and `git diff HEAD..upstream/main -- <paths>`. A fetch is safe with local edits; a merge or rebase is not.
+- Never merge or rebase upstream into a dirty worktree. Preserve and verify the current concern first, then integrate `upstream/main` with a clean tree and rerun the focused tests for both the upstream overlap and the local customization.
+- Report the ahead/behind count when upstream cannot be integrated immediately. Do not describe a fetch-only comparison as a completed pull.
+
 ## Test data
 
 An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:

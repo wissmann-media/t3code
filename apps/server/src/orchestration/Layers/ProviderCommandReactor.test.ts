@@ -2480,7 +2480,7 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("reacts to thread.approval.respond by forwarding provider approval response", async () => {
+  it("forwards approval responses from stopped sessions for provider recovery", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2491,7 +2491,7 @@ describe("ProviderCommandReactor", () => {
         threadId: ThreadId.make("thread-1"),
         session: {
           threadId: ThreadId.make("thread-1"),
-          status: "running",
+          status: "stopped",
           providerName: "codex",
           runtimeMode: "approval-required",
           activeTurnId: null,
@@ -2521,7 +2521,7 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("reacts to thread.user-input.respond by forwarding structured user input answers", async () => {
+  it("forwards user-input responses from stopped sessions for provider recovery", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2532,7 +2532,7 @@ describe("ProviderCommandReactor", () => {
         threadId: ThreadId.make("thread-1"),
         session: {
           threadId: ThreadId.make("thread-1"),
-          status: "running",
+          status: "stopped",
           providerName: "codex",
           runtimeMode: "approval-required",
           activeTurnId: null,
