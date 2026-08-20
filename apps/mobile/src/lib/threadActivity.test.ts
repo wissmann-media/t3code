@@ -14,41 +14,15 @@ import {
 import {
   buildPendingUserInputAnswers,
   buildThreadFeed,
-  derivePendingApprovals,
   deriveThreadFeedPresentation,
   isPendingUserInputOptionSelected,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
+  derivePendingApprovals,
 } from "./threadActivity";
 
-describe("derivePendingApprovals", () => {
-  it("keeps provider-specific permissions actionable", () => {
-    const activities = [
-      makeActivity({
-        id: EventId.make("approval-open-tool-permission"),
-        createdAt: "2026-08-04T15:10:46.305Z",
-        kind: "approval.requested",
-        summary: "Approval requested",
-        tone: "approval",
-        payload: {
-          requestId: "per-plan-governance",
-          requestType: "unknown",
-          detail: "plan-governance",
-        },
-      }),
-    ];
-
-    expect(derivePendingApprovals(activities)).toEqual([
-      {
-        requestId: "per-plan-governance",
-        requestKind: "tool",
-        createdAt: "2026-08-04T15:10:46.305Z",
-        detail: "plan-governance",
-      },
-    ]);
-||||||| 323dc321a
 const singleSelectQuestion = {
   id: "runtime",
   header: "Runtime",
@@ -688,5 +662,33 @@ describe("quiet timeline: nested agents", () => {
     );
     expect(ids).toContain("nested-done");
     expect(ids).not.toContain("shell-done");
+  });
+});
+
+describe("derivePendingApprovals", () => {
+  it("keeps provider-specific permissions actionable", () => {
+    const activities = [
+      makeActivity({
+        id: EventId.make("approval-open-tool-permission"),
+        createdAt: "2026-08-04T15:10:46.305Z",
+        kind: "approval.requested",
+        summary: "Approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "per-plan-governance",
+          requestType: "unknown",
+          detail: "plan-governance",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "per-plan-governance",
+        requestKind: "tool",
+        createdAt: "2026-08-04T15:10:46.305Z",
+        detail: "plan-governance",
+      },
+    ]);
   });
 });

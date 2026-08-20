@@ -152,7 +152,10 @@ describe("derivePendingApprovals", () => {
         requestKind: "tool",
         createdAt: "2026-08-04T15:10:46.305Z",
         detail: "plan-governance",
-||||||| 323dc321a
+      },
+    ]);
+  });
+
   it("derives dynamic tool requests as actionable generic approvals", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -172,7 +175,7 @@ describe("derivePendingApprovals", () => {
     expect(derivePendingApprovals(activities)).toEqual([
       {
         requestId: "req-dynamic-tool",
-        requestKind: "command",
+        requestKind: "tool",
         createdAt: "2026-02-23T00:00:01.000Z",
         detail: "Search the web",
       },

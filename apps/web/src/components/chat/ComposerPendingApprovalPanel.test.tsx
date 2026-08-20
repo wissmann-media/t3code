@@ -32,7 +32,7 @@ describe("ComposerPendingApprovalPanel", () => {
     expect(markup).not.toContain("truncate");
     expect(markup).not.toContain("line-clamp");
     expect(markup).toContain("min-w-0");
-    expect(markup).not.toContain("Command approval requested");
+    expect(markup).not.toContain(">Command approval<");
   });
 
   it("falls back to the approval kind when the provider sends an empty detail", () => {
@@ -64,7 +64,7 @@ describe("ComposerPendingApprovalPanel", () => {
       />,
     );
 
-    expect(markup).toContain("Tool approval requested");
+    expect(markup).toContain("Tool approval");
     expect(markup).toContain('aria-label="Tool or permission"');
     expect(markup).toContain("plan-governance");
   });

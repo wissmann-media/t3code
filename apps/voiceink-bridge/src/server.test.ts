@@ -424,7 +424,7 @@ describe("Bridge v3 canonical surface", () => {
       };
       expect(manifest.manifestSchemaVersion).toBe("3.0.0");
       expect(manifest.apiVersion).toBe(3);
-      expect(manifest.commands).toHaveLength(20);
+      expect(manifest.commands).toHaveLength(23);
       expect(manifest.commands.every((command) => command.available)).toBe(true);
     });
   });

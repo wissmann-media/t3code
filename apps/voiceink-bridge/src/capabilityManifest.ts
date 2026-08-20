@@ -120,6 +120,27 @@ const CANONICAL_COMMAND_METADATA: ReadonlyArray<
     providerDependency: false,
   },
   {
+    command: "thread.pin",
+    schema: "ThreadPinCommand",
+    risk: "mutation-low",
+    destructive: false,
+    providerDependency: false,
+  },
+  {
+    command: "thread.unpin",
+    schema: "ThreadUnpinCommand",
+    risk: "mutation-low",
+    destructive: false,
+    providerDependency: false,
+  },
+  {
+    command: "thread.pin.reorder",
+    schema: "ThreadPinReorderCommand",
+    risk: "mutation-low",
+    destructive: false,
+    providerDependency: false,
+  },
+  {
     command: "thread.meta.update",
     schema: "ThreadMetaUpdateCommand",
     risk: "mutation-medium",
