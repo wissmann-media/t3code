@@ -531,10 +531,6 @@ const postStatePredicate = (
       return threadPredicate(command.threadId, (thread) => thread.settledOverride !== "settled");
     case "thread.snooze":
       return threadPredicate(command.threadId, (thread) => thread.snoozedUntil !== null);
-    case "thread.pin":
-      return threadPredicate(command.threadId, (thread) => thread.pinnedAt != null);
-    case "thread.unpin":
-      return threadPredicate(command.threadId, (thread) => thread.pinnedAt == null);
     case "thread.unsnooze":
       return threadPredicate(command.threadId, (thread) => thread.snoozedUntil === null);
     case "thread.runtime-mode.set":
