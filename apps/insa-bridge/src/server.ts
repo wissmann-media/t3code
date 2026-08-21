@@ -127,12 +127,16 @@ async function route(
       })),
       aktivitaeten: detail.activities.slice(-10).map((a) => {
         const payload = a.payload === undefined ? "" : JSON.stringify(a.payload);
+        // Bei user-input.requested steckt der komplette Fragenkatalog im
+        // payload (ALLE questions eines Requests) — ein knappes Cap schnitt
+        // Frage 2/3 ab, Insa beantwortete nur Frage 1 und der Rest wurde
+        // mit dem Request verworfen (Befund 21.08. abends).
+        const cap = a.kind === "user-input.requested" ? 12_000 : 800;
         return {
           kind: a.kind,
           tone: a.tone,
           summary: a.summary.length > 500 ? `${a.summary.slice(0, 500)}…` : a.summary,
-          // Bei user-input.requested steckt der Frageinhalt im payload.
-          payload: payload.length > 800 ? `${payload.slice(0, 800)}…` : payload,
+          payload: payload.length > cap ? `${payload.slice(0, cap)}…` : payload,
           createdAt: a.createdAt,
         };
       }),
