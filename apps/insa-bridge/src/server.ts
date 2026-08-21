@@ -125,12 +125,17 @@ async function route(
         text: m.text.length > 4000 ? `${m.text.slice(0, 4000)}…` : m.text,
         createdAt: m.createdAt,
       })),
-      aktivitaeten: detail.activities.slice(-10).map((a) => ({
-        kind: a.kind,
-        tone: a.tone,
-        summary: a.summary.length > 500 ? `${a.summary.slice(0, 500)}…` : a.summary,
-        createdAt: a.createdAt,
-      })),
+      aktivitaeten: detail.activities.slice(-10).map((a) => {
+        const payload = a.payload === undefined ? "" : JSON.stringify(a.payload);
+        return {
+          kind: a.kind,
+          tone: a.tone,
+          summary: a.summary.length > 500 ? `${a.summary.slice(0, 500)}…` : a.summary,
+          // Bei user-input.requested steckt der Frageinhalt im payload.
+          payload: payload.length > 800 ? `${payload.slice(0, 800)}…` : payload,
+          createdAt: a.createdAt,
+        };
+      }),
       vorgeschlagenePlaene: detail.proposedPlans.map((p) => ({
         planMarkdown:
           p.planMarkdown.length > 24_000 ? `${p.planMarkdown.slice(0, 24_000)}…` : p.planMarkdown,
