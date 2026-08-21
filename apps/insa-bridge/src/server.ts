@@ -110,7 +110,34 @@ async function route(
   const outputMatch = /^\/v1\/threads\/([^/]+)\/output$/.exec(path);
   if (method === "GET" && outputMatch) {
     if (!options.t3.connected()) fail(503, "t3_unavailable");
-    return sendJson(response, 200, await options.t3.threadOutput(outputMatch[1]!));
+    // Nicht nur die letzte Assistant-Message: Interaktive Rückfragen leben
+    // in den activities, vorgelegte Pläne in proposedPlans — ohne beides
+    // sah Insa bei waiting_for_input nur Randbemerkungen (Befund 21.08.).
+    const [output, detail] = await Promise.all([
+      options.t3.threadOutput(outputMatch[1]!),
+      options.t3.threadDetail(outputMatch[1]!),
+    ]);
+    return sendJson(response, 200, {
+      ...output,
+      latestTurnState: detail.latestTurn?.state ?? null,
+      letzteNachrichten: detail.messages.slice(-5).map((m) => ({
+        role: m.role,
+        text: m.text.length > 4000 ? `${m.text.slice(0, 4000)}…` : m.text,
+        createdAt: m.createdAt,
+      })),
+      aktivitaeten: detail.activities.slice(-10).map((a) => ({
+        kind: a.kind,
+        tone: a.tone,
+        summary: a.summary.length > 500 ? `${a.summary.slice(0, 500)}…` : a.summary,
+        createdAt: a.createdAt,
+      })),
+      vorgeschlagenePlaene: detail.proposedPlans.map((p) => ({
+        planMarkdown:
+          p.planMarkdown.length > 24_000 ? `${p.planMarkdown.slice(0, 24_000)}…` : p.planMarkdown,
+        implementedAt: p.implementedAt,
+        createdAt: p.createdAt,
+      })),
+    });
   }
 
   const diffMatch = /^\/v1\/threads\/([^/]+)\/diff$/.exec(path);

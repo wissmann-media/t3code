@@ -80,4 +80,51 @@ describe("insa-bridge server", () => {
     expect(response.status).toBe(422);
     await server.close();
   });
+
+  it("enriches thread output with activities, recent messages, and proposed plans", async () => {
+    const onlineT3 = {
+      ...offlineT3(),
+      connected: () => true,
+      threadOutput: () => Promise.resolve({ threadId: "t1", assistantText: "Randbemerkung" }),
+      threadDetail: () =>
+        Promise.resolve({
+          latestTurn: { state: "completed" },
+          messages: [
+            { role: "user", text: "Auftrag", createdAt: "2026-08-21T10:00:00.000Z" },
+            {
+              role: "assistant",
+              text: "Wie soll zugeordnet werden?",
+              createdAt: "2026-08-21T10:01:00.000Z",
+            },
+          ],
+          activities: [
+            {
+              kind: "question",
+              tone: "approval",
+              summary: "Session wartet auf Antwort zur Zuordnung",
+              createdAt: "2026-08-21T10:01:30.000Z",
+            },
+          ],
+          proposedPlans: [
+            { planMarkdown: "# Plan", implementedAt: null, createdAt: "2026-08-21T10:02:00.000Z" },
+          ],
+        }),
+    } as unknown as T3Client;
+    const { server, call } = await startServer(onlineT3);
+    const response = await call("/v1/threads/t1/output");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      assistantText: string;
+      latestTurnState: string;
+      letzteNachrichten: { role: string; text: string }[];
+      aktivitaeten: { summary: string }[];
+      vorgeschlagenePlaene: { planMarkdown: string }[];
+    };
+    expect(body.assistantText).toBe("Randbemerkung");
+    expect(body.latestTurnState).toBe("completed");
+    expect(body.letzteNachrichten).toHaveLength(2);
+    expect(body.aktivitaeten[0]?.summary).toContain("Zuordnung");
+    expect(body.vorgeschlagenePlaene[0]?.planMarkdown).toBe("# Plan");
+    await server.close();
+  });
 });
