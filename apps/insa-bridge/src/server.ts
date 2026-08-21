@@ -7,6 +7,8 @@ export interface InsaBridgeServerOptions {
   readonly commands: BridgeCommandService;
   readonly t3: T3Client;
   readonly bearerToken: string;
+  /** Versions-Wächter: erwartete (Repo-)Version vs. verbundener Server. */
+  readonly version?: () => { expected: string; actual: string | null };
 }
 
 /**
@@ -58,12 +60,22 @@ async function route(
 
   if (method === "GET" && path === "/v1/health") {
     const snapshot = options.store.snapshot();
+    const version = options.version?.() ?? null;
+    const versionSkew =
+      version !== null && version.actual !== null && version.actual !== version.expected;
     return sendJson(response, 200, {
       apiVersion: 1,
-      status: options.t3.connected() ? "ok" : "degraded",
+      status: !options.t3.connected() ? "degraded" : versionSkew ? "version-skew" : "ok",
       t3Connection: options.t3.connected() ? "online" : "offline",
       environment: snapshot.environment?.label ?? null,
       sourceCursor: snapshot.sourceCursor,
+      ...(version === null
+        ? {}
+        : {
+            expectedServerVersion: version.expected,
+            serverVersion: version.actual,
+            versionSkew,
+          }),
     });
   }
 

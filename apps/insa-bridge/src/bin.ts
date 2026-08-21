@@ -1,4 +1,5 @@
 import NodeCrypto from "node:crypto";
+import NodeFs from "node:fs";
 import NodeOS from "node:os";
 import NodePath from "node:path";
 import {
@@ -71,6 +72,17 @@ const main = async (): Promise<void> => {
     "state.json",
   );
   const store = new BridgeStore(stateFile);
+  // Versions-Wächter: Repo-Stand (apps/server) vs. tatsächlich verbundener Server.
+  const expectedServerVersion = (
+    JSON.parse(
+      NodeFs.readFileSync(
+        NodePath.join(import.meta.dirname, "..", "..", "server", "package.json"),
+        "utf8",
+      ),
+    ) as { version: string }
+  ).version;
+  let actualServerVersion: string | null = null;
+
   const t3 = new EffectT3Client(t3Url, t3Bearer, {
     onConnecting: () => store.markConnecting(),
     onConnected: (environment: {
@@ -78,7 +90,15 @@ const main = async (): Promise<void> => {
       readonly label: string;
       readonly serverVersion: string;
       readonly providers: BridgeEnvironment["providers"];
-    }) => store.markConnected(environment),
+    }) => {
+      actualServerVersion = environment.serverVersion;
+      if (environment.serverVersion !== expectedServerVersion) {
+        process.stderr.write(
+          `WARNUNG Versions-Skew: T3-Server ${environment.serverVersion}, Repo erwartet ${expectedServerVersion}. Läuft die richtige T3-Version?\n`,
+        );
+      }
+      store.markConnected(environment);
+    },
     onProviderStatuses: (providers: BridgeEnvironment["providers"]) =>
       store.updateProviders(providers),
     onDisconnected: (reason: string) => store.markDisconnected(reason),
@@ -87,7 +107,13 @@ const main = async (): Promise<void> => {
       store.applyThreadItem(threadId, item),
   });
   const commands = new BridgeCommandService(store, t3);
-  const server = createInsaBridgeServer({ store, commands, t3, bearerToken: apiBearer });
+  const server = createInsaBridgeServer({
+    store,
+    commands,
+    t3,
+    bearerToken: apiBearer,
+    version: () => ({ expected: expectedServerVersion, actual: actualServerVersion }),
+  });
 
   await server.listen(port);
   const initialSnapshot = store.snapshot();
