@@ -60,13 +60,14 @@ async function route(
 
   if (method === "GET" && path === "/v1/health") {
     const snapshot = options.store.snapshot();
+    const connected = options.t3.connected();
     const version = options.version?.() ?? null;
     const versionSkew =
       version !== null && version.actual !== null && version.actual !== version.expected;
     return sendJson(response, 200, {
       apiVersion: 1,
-      status: !options.t3.connected() ? "degraded" : versionSkew ? "version-skew" : "ok",
-      t3Connection: options.t3.connected() ? "online" : "offline",
+      status: !connected ? "degraded" : versionSkew ? "version-skew" : "ok",
+      t3Connection: connected ? "online" : "offline",
       environment: snapshot.environment?.label ?? null,
       sourceCursor: snapshot.sourceCursor,
       ...(version === null
@@ -85,6 +86,7 @@ async function route(
 
   if (method === "GET" && path === "/v1/threads") {
     const projectId = url.searchParams.get("projectId");
+    const connected = options.t3.connected();
     const threads = options.store
       .snapshot()
       .threads.filter((t) => !projectId || t.projectId === projectId)
@@ -100,7 +102,11 @@ async function route(
         interactionMode: t.interactionMode,
         runtimeMode: t.runtimeMode,
         updatedAt: t.updatedAt,
-        freshness: t.freshness,
+        // Der persistierte Spiegel behält die letzte Quell-Frische. Sobald
+        // die Live-Verbindung weg ist, darf die API daraus aber nie ein
+        // aktuelles Lebenszeichen machen.
+        freshness: connected ? t.freshness : "stale-cache",
+        liveVerified: connected && t.freshness === "live",
         branch: t.branch,
         worktreePath: t.worktreePath,
       }));

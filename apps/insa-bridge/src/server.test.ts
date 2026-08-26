@@ -41,7 +41,7 @@ describe("insa-bridge server", () => {
   });
 
   it("serves health and the cached mirror while T3 is offline", async () => {
-    const { server, call } = await startServer();
+    const { server, store, call } = await startServer();
     const health = await call("/v1/health");
     expect(health.status).toBe(200);
     const healthBody = (await health.json()) as { status: string; t3Connection: string };
@@ -52,8 +52,19 @@ describe("insa-bridge server", () => {
     expect(projects.status).toBe(200);
     expect(((await projects.json()) as { projects: unknown[] }).projects).toEqual([]);
 
+    (store.snapshot().threads as unknown[]).push({
+      id: "cached-thread",
+      projectId: "x",
+      title: "Cached",
+      status: "running",
+      updatedAt: "2026-08-26T14:22:43.984Z",
+      freshness: "live",
+    });
     const threads = await call("/v1/threads?projectId=x");
     expect(threads.status).toBe(200);
+    expect((await threads.json()) as unknown).toMatchObject({
+      threads: [{ id: "cached-thread", freshness: "stale-cache", liveVerified: false }],
+    });
     await server.close();
   });
 
