@@ -63,7 +63,28 @@ describe("insa-bridge server", () => {
     const threads = await call("/v1/threads?projectId=x");
     expect(threads.status).toBe(200);
     expect((await threads.json()) as unknown).toMatchObject({
-      threads: [{ id: "cached-thread", freshness: "stale-cache", liveVerified: false }],
+      threads: [
+        { id: "cached-thread", environmentId: null, freshness: "stale-cache", liveVerified: false },
+      ],
+    });
+    await server.close();
+  });
+
+  it("exposes the stable environment id required for desktop thread deep links", async () => {
+    const { server, store, call } = await startServer();
+    store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.0" });
+    (store.snapshot().threads as unknown[]).push({
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Deep link target",
+      status: "idle",
+      updatedAt: "2026-08-28T12:00:00.000Z",
+      freshness: "live",
+    });
+
+    const response = await call("/v1/threads");
+    expect((await response.json()) as unknown).toMatchObject({
+      threads: [{ id: "thread-1", environmentId: "environment-1" }],
     });
     await server.close();
   });

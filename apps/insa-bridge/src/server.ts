@@ -87,11 +87,12 @@ async function route(
   if (method === "GET" && path === "/v1/threads") {
     const projectId = url.searchParams.get("projectId");
     const connected = options.t3.connected();
-    const threads = options.store
-      .snapshot()
-      .threads.filter((t) => !projectId || t.projectId === projectId)
+    const snapshot = options.store.snapshot();
+    const threads = snapshot.threads
+      .filter((t) => !projectId || t.projectId === projectId)
       .map((t) => ({
         id: t.id,
+        environmentId: snapshot.environment?.id ?? null,
         projectId: t.projectId,
         title: t.title,
         provider: t.provider,
