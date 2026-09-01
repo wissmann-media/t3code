@@ -15,6 +15,7 @@ const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 export interface SelectableModelOption {
   slug: string;
   name: string;
+  aliases?: ReadonlyArray<string> | undefined;
 }
 
 export function createModelCapabilities(input: {
@@ -281,6 +282,13 @@ export function resolveSelectableModel(
     return byName.slug;
   }
 
+  const byAlias = options.find((option) =>
+    option.aliases?.some((alias) => alias.toLowerCase() === trimmed.toLowerCase()),
+  );
+  if (byAlias) {
+    return byAlias.slug;
+  }
+
   const normalized = normalizeModelSlug(trimmed, provider);
   if (!normalized) {
     return null;
@@ -362,7 +370,11 @@ export function applyClaudePromptEffortPrefix(
   if (!trimmed) {
     return trimmed;
   }
-  if (effort !== "ultrathink") {
+  // Prefixing a slash command turns it into plain prose, so Claude never
+  // runs it. Command names come from arbitrary file names ("/deploy.prod",
+  // "/plugin:skill"), so accept any first token without a second slash;
+  // absolute paths like "/home/theo/app.ts" keep the prefix.
+  if (effort !== "ultrathink" || /^\/[^\s/]+(?:\s|$)/u.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("Ultrathink:")) {

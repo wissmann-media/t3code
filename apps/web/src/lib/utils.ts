@@ -20,6 +20,20 @@ export function isLinuxPlatform(platform: string): boolean {
   return /linux/i.test(platform);
 }
 
+export function normalizeSearchText(value: string): string {
+  return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+export function getLocalFileManagerName(platform: string): string {
+  if (isMacPlatform(platform)) {
+    return "Finder";
+  }
+  if (isWindowsPlatform(platform)) {
+    return "Explorer";
+  }
+  return "Files";
+}
+
 export function randomHex(byteLength: number): string {
   return Encoding.encodeHex(globalThis.crypto.getRandomValues(new Uint8Array(byteLength)));
 }

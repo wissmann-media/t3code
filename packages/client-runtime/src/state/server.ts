@@ -41,6 +41,14 @@ import {
   type EnvironmentRpcInput,
 } from "../rpc/client.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import {
+  applyServerConfigProjection,
+  type ServerConfigProjection,
+  withoutEnvironmentThemes,
+} from "./serverConfigProjection.ts";
+
+// Exported server state includes this type in its inferred public return type.
+export type { ServerConfigProjection } from "./serverConfigProjection.ts";
 
 export type ServerUpdateStage = "downloading" | "installing" | "resuming";
 
@@ -160,16 +168,30 @@ export function validateServerUpdateReadyEvent(
  * each nudge is the pacer: a connection that fails instantly re-enters backoff
  * immediately and would otherwise spin a tight retry loop.
  *
+ * A newly restarted server can also reject the first environment credential.
+ * Authentication blocks need the same paced retry during this known restart;
+ * permission and configuration failures remain blocked.
+ *
  * Callers fork this as a child of the update command so it is interrupted as
  * soon as the update settles, whether it succeeds, fails, or times out.
  */
 export function nudgeReconnectDuringUpdateRestart(input: {
-  readonly stateChanges: Stream.Stream<{ readonly phase: string }, unknown>;
+  readonly stateChanges: Stream.Stream<
+    {
+      readonly phase: string;
+      readonly lastFailure?: { readonly reason: string } | null;
+    },
+    unknown
+  >;
   readonly retryNow: Effect.Effect<void>;
   readonly interval?: Duration.Duration;
 }): Effect.Effect<void> {
   return input.stateChanges.pipe(
-    Stream.filter((state) => state.phase === "backoff"),
+    Stream.filter(
+      (state) =>
+        state.phase === "backoff" ||
+        (state.phase === "blocked" && state.lastFailure?.reason === "authentication"),
+    ),
     Stream.runForEach(() =>
       Effect.sleep(input.interval ?? Duration.seconds(1)).pipe(Effect.andThen(input.retryNow)),
     ),
@@ -248,54 +270,6 @@ export function resolveServerUpdateProgressResult<E>(
   return Effect.fail(new ServerUpdateProgressIncompleteError({ targetVersion }));
 }
 
-export interface ServerConfigProjection {
-  readonly config: ServerConfig;
-  readonly latestEvent: ServerConfigStreamEvent;
-  readonly source: "cache" | "live";
-}
-
-export function applyServerConfigProjection(
-  current: Option.Option<ServerConfigProjection>,
-  event: ServerConfigStreamEvent,
-): Option.Option<ServerConfigProjection> {
-  switch (event.type) {
-    case "snapshot":
-      return Option.some({
-        config: event.config,
-        latestEvent: event,
-        source: "live",
-      });
-    case "keybindingsUpdated":
-      return Option.map(current, (projection) => ({
-        config: {
-          ...projection.config,
-          keybindings: event.payload.keybindings,
-          issues: event.payload.issues,
-        },
-        latestEvent: event,
-        source: "live",
-      }));
-    case "providerStatuses":
-      return Option.map(current, (projection) => ({
-        config: {
-          ...projection.config,
-          providers: event.payload.providers,
-        },
-        latestEvent: event,
-        source: "live",
-      }));
-    case "settingsUpdated":
-      return Option.map(current, (projection) => ({
-        config: {
-          ...projection.config,
-          settings: event.payload.settings,
-        },
-        latestEvent: event,
-        source: "live",
-      }));
-  }
-}
-
 export function projectServerConfig(
   current: Option.Option<ServerConfigProjection>,
   event: ServerConfigStreamEvent,
@@ -310,13 +284,8 @@ const cachedConfigSnapshotEvent = (config: ServerConfig): ServerConfigStreamEven
   config,
 });
 
-/**
- * Keeps a complete server configuration available during reconnects. Server
- * config carries the provider/model catalogue used by task creation, so it is
- * useful—and safe—to retain after a transport session ends.
- */
 export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConfigState.make")(
-  function* () {
+  function* (environmentThemes?: boolean) {
     const supervisor = yield* EnvironmentSupervisor;
     const cache = yield* EnvironmentCacheStore;
     const environmentId = supervisor.target.environmentId;
@@ -332,9 +301,11 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
       ),
     );
     const state = yield* SubscriptionRef.make<Option.Option<ServerConfigProjection>>(
-      Option.map(cachedConfig, (config) => ({
-        config,
-        latestEvent: cachedConfigSnapshotEvent(config),
+      // Stripped on load as well as on save: a cache written by an earlier
+      // build can still carry published themes.
+      Option.map(cachedConfig, (cached) => ({
+        config: withoutEnvironmentThemes(cached),
+        latestEvent: cachedConfigSnapshotEvent(withoutEnvironmentThemes(cached)),
         source: "cache" as const,
       })),
     );
@@ -344,7 +315,7 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
     const persist = Effect.fn("EnvironmentServerConfigState.persist")(function* (
       config: ServerConfig,
     ) {
-      return yield* cache.saveServerConfig(environmentId, config).pipe(
+      return yield* cache.saveServerConfig(environmentId, withoutEnvironmentThemes(config)).pipe(
         Effect.as(true),
         Effect.catch((error) =>
           Effect.logWarning("Could not persist cached server configuration.").pipe(
@@ -375,7 +346,10 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
       Effect.forkScoped,
     );
 
-    yield* subscribe(WS_METHODS.subscribeServerConfig, {}).pipe(
+    yield* subscribe(
+      WS_METHODS.subscribeServerConfig,
+      environmentThemes === true ? { environmentThemes: true } : {},
+    ).pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           const next = applyServerConfigProjection(yield* SubscriptionRef.get(state), event);
@@ -405,11 +379,14 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
   },
 );
 
-export function serverConfigStateChanges(environmentId: EnvironmentId) {
+export function serverConfigStateChanges(
+  environmentId: EnvironmentId,
+  environmentThemes?: boolean,
+) {
   return followStreamInEnvironment(
     environmentId,
     Stream.unwrap(
-      makeEnvironmentServerConfigState().pipe(
+      makeEnvironmentServerConfigState(environmentThemes).pipe(
         Effect.map((state) =>
           SubscriptionRef.changes(state).pipe(
             Stream.filterMap((projection) =>
@@ -462,6 +439,12 @@ export function createServerEnvironmentAtoms<R, E>(
     readonly initialConfigValueAtom: (
       environmentId: EnvironmentId,
     ) => Atom.Atom<ServerConfig | null>;
+    /**
+     * Whether this surface renders themes the environment publishes. Mobile
+     * keeps its own appearance settings, so it neither asks for the stream nor
+     * receives the payload.
+     */
+    readonly environmentThemes?: boolean;
   },
 ) {
   const configScheduler = createAtomCommandScheduler();
@@ -473,7 +456,7 @@ export function createServerEnvironmentAtoms<R, E>(
   };
   const configProjectionFamily = Atom.family((environmentId: EnvironmentId) =>
     runtime
-      .atom(serverConfigStateChanges(environmentId))
+      .atom(serverConfigStateChanges(environmentId, options.environmentThemes))
       .pipe(
         Atom.setIdleTTL(5 * 60_000),
         Atom.withLabel(`environment-data:server:config-projection:${environmentId}`),

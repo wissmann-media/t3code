@@ -34,6 +34,7 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import * as ModelManifest from "../ModelManifest.ts";
 import * as OpenCodeRuntime from "../opencodeRuntime.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
@@ -381,6 +382,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               shortDescription: "Debug failing GitHub Actions checks",
             },
           ]);
+          assert.deepStrictEqual(status.slashCommands, [
+            {
+              name: "feedback",
+              description: "Send this thread and Codex logs to OpenAI",
+              input: { hint: "Describe the issue (optional)" },
+            },
+          ]);
         }),
       );
 
@@ -494,10 +502,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(
-            status.message,
-            "Codex CLI (`codex`) is not installed or not on PATH.",
-          );
+          assert.strictEqual(status.message, "Codex CLI (`codex`) was not found on PATH.");
         }),
       );
 
@@ -584,18 +589,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               }),
             },
           ],
-          slashCommands: [],
-          skills: [],
+          slashCommands: [{ name: "review", description: "Review changes" }],
+          skills: [
+            {
+              name: "typescript",
+              description: "TypeScript help",
+              path: "/skills/typescript/SKILL.md",
+              enabled: true,
+            },
+          ],
         } as const satisfies ServerProvider;
         const refreshedProvider = {
           ...previousProvider,
           checkedAt: "2026-04-14T00:01:00.000Z",
           models: [],
+          slashCommands: [],
+          skills: [],
         } satisfies ServerProvider;
 
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
           ...previousProvider.models,
         ]);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).slashCommands,
+          [],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).skills,
+          [],
+        );
       });
 
       it("drops stale OpenCode models missing from a successful refresh", () => {
@@ -665,8 +687,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               capabilities: null,
             },
           ],
-          slashCommands: [],
-          skills: [],
+          slashCommands: [{ name: "review", description: "Review changes" }],
+          skills: [
+            {
+              name: "typescript",
+              description: "TypeScript help",
+              path: "/skills/typescript/SKILL.md",
+              enabled: true,
+            },
+          ],
         } as const satisfies ServerProvider;
         const refreshedProvider = {
           ...previousProvider,
@@ -680,6 +709,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
           ...previousProvider.models,
         ]);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).slashCommands,
+          previousProvider.slashCommands,
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).skills,
+          previousProvider.skills,
+        );
       });
 
       it("classifies pending, logout, uninstall, and reconnect OpenCode inventories", () => {
@@ -708,8 +745,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               capabilities: null,
             },
           ],
-          slashCommands: [],
-          skills: [],
+          slashCommands: [{ name: "review", description: "Review changes" }],
+          skills: [
+            {
+              name: "typescript",
+              description: "TypeScript help",
+              path: "/skills/typescript/SKILL.md",
+              enabled: true,
+            },
+          ],
         } as const satisfies ServerProvider;
         const pendingProvider = {
           ...previousProvider,
@@ -727,6 +771,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           auth: { status: "unknown" },
           checkedAt: "2026-07-17T00:02:00.000Z",
           models: [],
+          slashCommands: [],
+          skills: [],
           message: "OpenCode is available, but it did not report any connected upstream providers.",
         } satisfies ServerProvider;
         const missingProvider = {
@@ -758,6 +804,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
         assert.deepStrictEqual(
           mergeProviderSnapshot(previousProvider, loggedOutProvider).models,
+          [],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, loggedOutProvider).slashCommands,
+          [],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, loggedOutProvider).skills,
           [],
         );
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, missingProvider).models, []);
@@ -888,6 +942,182 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             assert.deepStrictEqual(yield* registry.getProviders, [initialProvider]);
             assert.strictEqual(yield* Ref.get(refreshCalls), 0);
           }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("refreshes OpenCode catalogs and preserves other providers", () =>
+        Effect.gen(function* () {
+          const codexDriver = ProviderDriverKind.make("codex");
+          const openCodeDriver = ProviderDriverKind.make("opencode");
+          const codexInstanceId = ProviderInstanceId.make("codex");
+          const openCodeInstanceId = ProviderInstanceId.make("opencode");
+          const codexRefreshCalls = yield* Ref.make(0);
+          const openCodeRefreshCalls = yield* Ref.make(0);
+          const codexProvider = {
+            instanceId: codexInstanceId,
+            driver: codexDriver,
+            status: "ready",
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated" },
+            checkedAt: "2026-06-10T00:00:00.000Z",
+            version: "1.0.0",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          } as const satisfies ServerProvider;
+          const failedOpenCodeProvider = {
+            instanceId: openCodeInstanceId,
+            driver: openCodeDriver,
+            status: "error",
+            enabled: true,
+            installed: true,
+            auth: { status: "unknown" },
+            checkedAt: "2026-06-10T00:00:00.000Z",
+            version: "1.0.0",
+            message: "Failed to refresh OpenCode models.",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          } as const satisfies ServerProvider;
+          const recoveredOpenCodeProvider = {
+            ...failedOpenCodeProvider,
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-06-10T00:01:00.000Z",
+            message: "One upstream provider connected through OpenCode.",
+            models: [
+              {
+                slug: "github/gpt-5",
+                name: "GPT-5",
+                subProvider: "GitHub",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
+          } as const satisfies ServerProvider;
+          const changedCatalogProvider = {
+            ...recoveredOpenCodeProvider,
+            checkedAt: "2026-06-10T00:02:00.000Z",
+            models: [
+              {
+                slug: "anthropic/claude-sonnet-4",
+                name: "Claude Sonnet 4",
+                subProvider: "Anthropic",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
+          } as const satisfies ServerProvider;
+          const catalogSnapshot = yield* Ref.make<ServerProvider>(recoveredOpenCodeProvider);
+          const instances = [
+            {
+              instanceId: codexInstanceId,
+              driverKind: codexDriver,
+              continuationIdentity: {
+                driverKind: codexDriver,
+                continuationKey: "codex:instance:codex",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: codexDriver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(codexProvider),
+                refresh: Ref.update(codexRefreshCalls, (count) => count + 1).pipe(
+                  Effect.as(codexProvider),
+                ),
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            },
+            {
+              instanceId: openCodeInstanceId,
+              driverKind: openCodeDriver,
+              continuationIdentity: {
+                driverKind: openCodeDriver,
+                continuationKey: "opencode:instance:opencode",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: openCodeDriver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(failedOpenCodeProvider),
+                refresh: Ref.update(openCodeRefreshCalls, (count) => count + 1).pipe(
+                  Effect.andThen(Ref.get(catalogSnapshot)),
+                ),
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            },
+          ] satisfies ReadonlyArray<ProviderInstance>;
+          const instanceRegistryLayer = Layer.succeed(
+            ProviderInstanceRegistry.ProviderInstanceRegistry,
+            {
+              getInstance: (instanceId) =>
+                Effect.succeed(instances.find((instance) => instance.instanceId === instanceId)),
+              listInstances: Effect.succeed(instances),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+            },
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderRegistryLive.pipe(
+              Layer.provideMerge(instanceRegistryLayer),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), {
+                  prefix: "t3-provider-registry-reconnect-refresh-",
+                }),
+              ),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const registry = yield* ProviderRegistry.ProviderRegistry;
+            const initialProviders = yield* registry.getProviders;
+            assert.strictEqual(
+              initialProviders.find((provider) => provider.instanceId === openCodeInstanceId)
+                ?.status,
+              "error",
+            );
+
+            const recoveredProviders = yield* registry.refresh();
+            assert.deepStrictEqual(
+              recoveredProviders.find((provider) => provider.instanceId === openCodeInstanceId)
+                ?.models,
+              recoveredOpenCodeProvider.models,
+            );
+            assert.deepStrictEqual(
+              recoveredProviders.find((provider) => provider.instanceId === codexInstanceId),
+              codexProvider,
+            );
+
+            yield* Ref.set(catalogSnapshot, changedCatalogProvider);
+            const changedProviders = yield* registry.refresh();
+            assert.deepStrictEqual(
+              changedProviders.find((provider) => provider.instanceId === openCodeInstanceId)
+                ?.models,
+              changedCatalogProvider.models,
+            );
+            assert.deepStrictEqual(
+              changedProviders.find((provider) => provider.instanceId === codexInstanceId),
+              codexProvider,
+            );
+          }).pipe(Effect.provide(runtimeServices));
+
+          assert.strictEqual(yield* Ref.get(codexRefreshCalls), 2);
+          assert.strictEqual(yield* Ref.get(openCodeRefreshCalls), 2);
         }),
       );
 
@@ -1419,6 +1649,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
+            Layer.provideMerge(ModelManifest.layerTest),
             Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
             Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
             // NO spawner mock — `ChildProcessSpawner` is supplied by the
@@ -1462,7 +1693,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             assert.strictEqual(codexPersonal?.installed, false);
             assert.strictEqual(
               codexPersonal?.message,
-              "Codex CLI (`codex`) is not installed or not on PATH.",
+              "Codex CLI (`codex`) was not found on PATH.",
             );
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -1512,6 +1743,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
+            Layer.provideMerge(ModelManifest.layerTest),
             Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
             Layer.updateService(ChildProcessSpawner.ChildProcessSpawner, (spawner) =>
               ChildProcessSpawner.make((command) => {
@@ -1634,6 +1866,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
+            Layer.provideMerge(ModelManifest.layerTest),
             Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
             Layer.provideMerge(NodeServices.layer),
             Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
@@ -1656,7 +1889,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
       );
 
       it.effect(
-        "keeps cursor disabled and skips probing when the provider setting is disabled",
+        "keeps Cursor disabled and skips provider probing when settings use their defaults",
         () =>
           Effect.gen(function* () {
             const serverSettings = yield* makeMutableServerSettingsService(
@@ -1664,9 +1897,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 deepMerge(encodedDefaultServerSettings, {
                   providers: {
                     codex: {
-                      enabled: false,
-                    },
-                    cursor: {
                       enabled: false,
                     },
                     grok: {
@@ -1696,6 +1926,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   ProviderEventLoggers.NoOpProviderEventLoggers,
                 ),
               ),
+              Layer.provideMerge(ModelManifest.layerTest),
               Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
               Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
               Layer.provideMerge(
@@ -1814,192 +2045,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("includes Claude Opus 5 on supported Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          const opus5 = status.models.find((model) => model.slug === "claude-opus-5");
-          assert.strictEqual(opus5?.name, "Claude Opus 5");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.219\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("hides Claude Opus 5 on older Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-opus-5"),
-            false,
-          );
-          assert.strictEqual(
-            status.message,
-            "Claude Code v2.1.218 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it.",
-          );
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.218\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("includes Claude Fable 5 on supported Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          const fable5 = status.models.find((model) => model.slug === "claude-fable-5");
-          assert.strictEqual(fable5?.name, "Claude Fable 5");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.169\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("hides Claude Fable 5 on older Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-fable-5"),
-            false,
-          );
-          assert.strictEqual(
-            status.message,
-            "Claude Code v2.1.168 is too old for Claude Fable 5. Upgrade to v2.1.169 or newer to access it.",
-          );
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.168\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect(
-        "includes Claude Opus 4.7 with xhigh as the default effort on supported versions",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
-            );
-            const opus47 = status.models.find((model) => model.slug === "claude-opus-4-7");
-            if (!opus47) {
-              assert.fail("Expected Claude Opus 4.7 to be present for Claude Code v2.1.111.");
-            }
-            if (!opus47.capabilities) {
-              assert.fail(
-                "Expected Claude Opus 4.7 capabilities to be present for Claude Code v2.1.111.",
-              );
-            }
-            const effortDescriptor = opus47.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.find((option) => option.isDefault)
-                : undefined,
-              { id: "xhigh", label: "Extra High", isDefault: true },
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.111\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
-
-      it.effect("hides Claude Opus 4.7 on older Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-opus-4-7"),
-            false,
-          );
-          assert.strictEqual(
-            status.message,
-            "Claude Code v2.1.110 is too old for Claude Opus 4.7. Upgrade to v2.1.111 or newer to access it.",
-          );
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.110\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
@@ -2151,6 +2196,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
 
           assert.deepStrictEqual(status.slashCommands, [
             {
+              name: "compact",
+              description: "Summarize the conversation and reduce context usage",
+            },
+            {
               name: "review",
               description: "Review a pull request",
               input: { hint: "pr-or-branch" },
@@ -2193,6 +2242,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           );
 
           assert.deepStrictEqual(status.slashCommands, [
+            {
+              name: "compact",
+              description: "Summarize the conversation and reduce context usage",
+            },
             {
               name: "ui",
               description: "Explore and refine UI",
@@ -2252,10 +2305,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(
-            status.message,
-            "Claude Agent CLI (`claude`) is not installed or not on PATH.",
-          );
+          assert.strictEqual(status.message, "Claude Agent CLI (`claude`) was not found on PATH.");
         }).pipe(Effect.provide(failingSpawnerLayer("spawn claude ENOENT"))),
       );
 
