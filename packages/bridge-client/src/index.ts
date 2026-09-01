@@ -25,6 +25,7 @@ export type {
   BridgeEnvironment,
   BridgeProject,
   BridgeSnapshot,
+  BridgeStatusEvent,
   BridgeThread,
   BridgeThreadOutput,
 } from "../../../apps/voiceink-bridge/src/types.ts";

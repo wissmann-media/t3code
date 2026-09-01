@@ -70,6 +70,7 @@ import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 const PROVIDER = ProviderDriverKind.make("grok");
 const GROK_RESUME_VERSION = 1 as const;
@@ -211,6 +212,24 @@ function completedStopReasonFromPromptResponse(
   return response.stopReason;
 }
 
+function completedUsageFromPromptResponse(response: EffectAcpSchema.PromptResponse): {
+  readonly usage?: unknown;
+  readonly modelUsage?: Record<string, unknown>;
+  readonly totalCostUsd?: number;
+} {
+  const meta = response._meta;
+  const modelUsage = isRecord(meta) && isRecord(meta.modelUsage) ? meta.modelUsage : undefined;
+  const totalCostUsd =
+    isRecord(meta) && typeof meta.totalCostUsd === "number" && Number.isFinite(meta.totalCostUsd)
+      ? meta.totalCostUsd
+      : undefined;
+  return {
+    ...(response.usage !== undefined && response.usage !== null ? { usage: response.usage } : {}),
+    ...(modelUsage ? { modelUsage } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+  };
+}
+
 export function grokPromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
@@ -272,6 +291,42 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+
+    const readGrokTurnUsage = (session: ProviderSession, acpSessionId: string) =>
+      Effect.gen(function* () {
+        const home = options?.environment?.HOME ?? process.env.HOME;
+        const cwd = session.cwd;
+        if (!home || !cwd) return undefined;
+        const logPath = path.join(
+          home,
+          ".grok",
+          "sessions",
+          encodeURIComponent(cwd),
+          acpSessionId,
+          "updates.jsonl",
+        );
+        const contents = yield* fileSystem
+          .readFileString(logPath)
+          .pipe(Effect.catch(() => Effect.succeed("")));
+        const lines = contents.split("\n").filter(Boolean);
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+          const decoded = decodeUnknownJsonStringExit(lines[index] ?? "");
+          if (Exit.isFailure(decoded) || !isRecord(decoded.value)) continue;
+          const params = isRecord(decoded.value.params) ? decoded.value.params : {};
+          const update = isRecord(params.update) ? params.update : {};
+          if (update.sessionUpdate !== "turn_completed" || !isRecord(update.usage)) continue;
+          const usage = update.usage;
+          const costUsdTicks = usage.costUsdTicks;
+          return {
+            usage,
+            ...(isRecord(usage.modelUsage) ? { modelUsage: usage.modelUsage } : {}),
+            ...(typeof costUsdTicks === "number" && Number.isFinite(costUsdTicks)
+              ? { totalCostUsd: costUsdTicks / 10_000_000_000 }
+              : {}),
+          };
+        }
+        return undefined;
+      });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -1185,6 +1240,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
                 const completedStopReason = completedStopReasonFromPromptResponse(result);
+                const logUsage = yield* readGrokTurnUsage(ctx.session, prepared.acpSessionId);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),
@@ -1194,6 +1250,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   payload: {
                     state: result.stopReason === "cancelled" ? "cancelled" : "completed",
                     stopReason: completedStopReason,
+                    ...completedUsageFromPromptResponse(result),
+                    ...logUsage,
                   },
                 });
                 ctx.interruptedTurnIds.delete(prepared.turnId);

@@ -1,6 +1,14 @@
 import NodeHttp from "node:http";
-import type { BridgeCommandService, BridgeStore, T3Client } from "@t3tools/bridge-client";
+import NodeTimers from "node:timers";
+import type {
+  BridgeCommandService,
+  BridgeStatusEvent,
+  BridgeStore,
+  T3Client,
+} from "@t3tools/bridge-client";
 import { decodeCanonicalCommand } from "@t3tools/bridge-client";
+
+const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 
 export interface InsaBridgeServerOptions {
   readonly store: BridgeStore;
@@ -19,8 +27,9 @@ export interface InsaBridgeServerOptions {
  * steckt in der wiederverwendeten Command-/Client-Schicht.
  */
 export function createInsaBridgeServer(options: InsaBridgeServerOptions) {
+  const eventStreams = new Set<NodeHttp.ServerResponse>();
   const server = NodeHttp.createServer((request, response) => {
-    void route(options, request, response).catch((error: unknown) => {
+    void route(options, request, response, eventStreams).catch((error: unknown) => {
       const known = error as { statusCode?: number; message?: string };
       sendJson(response, known.statusCode ?? 500, {
         error: known.message?.slice(0, 300) ?? "internal_error",
@@ -37,7 +46,10 @@ export function createInsaBridgeServer(options: InsaBridgeServerOptions) {
         }),
       ),
     close: () =>
-      new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
+      new Promise<void>((resolve, reject) => {
+        for (const response of eventStreams) response.destroy();
+        server.close((e) => (e ? reject(e) : resolve()));
+      }),
   };
 }
 
@@ -49,6 +61,7 @@ async function route(
   options: InsaBridgeServerOptions,
   request: NodeHttp.IncomingMessage,
   response: NodeHttp.ServerResponse,
+  eventStreams: Set<NodeHttp.ServerResponse>,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const path = url.pathname;
@@ -70,6 +83,7 @@ async function route(
       t3Connection: connected ? "online" : "offline",
       environment: snapshot.environment?.label ?? null,
       sourceCursor: snapshot.sourceCursor,
+      eventCursor: options.store.eventsAfter(0).at(-1)?.sequence ?? 0,
       ...(version === null
         ? {}
         : {
@@ -78,6 +92,16 @@ async function route(
             versionSkew,
           }),
     });
+  }
+
+  if (method === "GET" && path === "/v1/events") {
+    return streamEvents(
+      options.store,
+      request,
+      response,
+      parseCursor(url.searchParams.get("after")),
+      eventStreams,
+    );
   }
 
   if (method === "GET" && path === "/v1/projects") {
@@ -127,7 +151,11 @@ async function route(
     return sendJson(response, 200, {
       ...output,
       latestTurnState: detail.latestTurn?.state ?? null,
-      letzteNachrichten: detail.messages.slice(-5).map((m) => ({
+      // Broker-Runden bestehen aus User-Result + Assistant-Request. Fünf
+      // Nachrichten ließen bei längeren Werkzeugfolgen den Rundenzähler und
+      // Abschlussmarker aus dem Sichtfenster fallen. 40 deckt das harte
+      // Maximum von zehn Runden plus Start-/Abschluss-Turn mit Reserve ab.
+      letzteNachrichten: detail.messages.slice(-40).map((m) => ({
         role: m.role,
         text: m.text.length > 4000 ? `${m.text.slice(0, 4000)}…` : m.text,
         createdAt: m.createdAt,
@@ -174,6 +202,54 @@ async function route(
 
   return sendJson(response, 404, { error: "not_found" });
 }
+
+const parseCursor = (value: string | null): number => {
+  if (value === null || value === "") return 0;
+  if (!/^[0-9]+$/.test(value)) fail(400, "invalid_cursor");
+  const cursor = Number(value);
+  if (!Number.isSafeInteger(cursor)) fail(400, "invalid_cursor");
+  return cursor;
+};
+
+const streamEvents = (
+  store: BridgeStore,
+  request: NodeHttp.IncomingMessage,
+  response: NodeHttp.ServerResponse,
+  after: number,
+  eventStreams: Set<NodeHttp.ServerResponse>,
+): void => {
+  response.writeHead(200, {
+    "cache-control": "no-cache, no-store",
+    connection: "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+    "x-content-type-options": "nosniff",
+  });
+  eventStreams.add(response);
+  response.write(": insa-t3-bridge\n\n");
+  for (const event of store.eventsAfter(after)) writeEvent(response, event);
+  const unsubscribe = store.subscribe((event) => {
+    if (response.writableLength > MAX_SSE_BUFFER_BYTES) {
+      response.destroy();
+      return;
+    }
+    writeEvent(response, event);
+  });
+  const heartbeat = NodeTimers.setInterval(() => {
+    if (!response.destroyed) response.write(": keepalive\n\n");
+  }, 15_000);
+  const close = (): void => {
+    NodeTimers.clearInterval(heartbeat);
+    unsubscribe();
+    eventStreams.delete(response);
+  };
+  request.once("close", close);
+  response.once("close", close);
+};
+
+const writeEvent = (response: NodeHttp.ServerResponse, event: BridgeStatusEvent): void => {
+  response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+};
 
 function sendJson(response: NodeHttp.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);

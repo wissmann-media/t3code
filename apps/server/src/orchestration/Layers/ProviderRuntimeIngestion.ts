@@ -788,6 +788,36 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "turn.completed": {
+      if (
+        event.payload.usage === undefined &&
+        event.payload.modelUsage === undefined &&
+        event.payload.totalCostUsd === undefined
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "turn.usage",
+          summary: "Turn usage recorded",
+          payload: {
+            ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.modelUsage !== undefined
+              ? { modelUsage: event.payload.modelUsage }
+              : {}),
+            ...(event.payload.totalCostUsd !== undefined
+              ? { totalCostUsd: event.payload.totalCostUsd }
+              : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "item.updated": {
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];

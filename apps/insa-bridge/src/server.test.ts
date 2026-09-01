@@ -70,6 +70,39 @@ describe("insa-bridge server", () => {
     await server.close();
   });
 
+  it("streams socket-derived bridge events immediately and resumes after a cursor", async () => {
+    const { server, store, call } = await startServer();
+    store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.0" });
+    const existingCursor = store.eventsAfter(0).at(-1)?.sequence ?? 0;
+    const controller = new AbortController();
+    const response = await call(`/v1/events?after=${existingCursor}`, {
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const initial = decoder.decode((await reader.read()).value);
+    expect(initial).toContain("insa-t3-bridge");
+
+    store.emitExternalEvent("thread.completed", "test:thread-completed", {
+      threadId: "thread-1",
+      freshness: "live",
+      payload: { status: "completed" },
+    });
+    const event = decoder.decode((await reader.read()).value);
+    expect(event).toContain("event: thread.completed");
+    expect(event).toContain('"threadId":"thread-1"');
+    controller.abort();
+    await server.close();
+  });
+
+  it("rejects invalid event cursors", async () => {
+    const { server, call } = await startServer();
+    expect((await call("/v1/events?after=invalid")).status).toBe(400);
+    await server.close();
+  });
+
   it("exposes the stable environment id required for desktop thread deep links", async () => {
     const { server, store, call } = await startServer();
     store.markConnected({ id: "environment-1", label: "Local T3", serverVersion: "0.0.0" });

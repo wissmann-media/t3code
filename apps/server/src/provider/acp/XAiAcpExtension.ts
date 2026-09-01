@@ -16,6 +16,30 @@ const XAiPromptCompleteNotification = Schema.Struct({
 
 type XAiPromptCompleteNotification = typeof XAiPromptCompleteNotification.Type;
 
+const XAiTurnUsage = Schema.Struct({
+  inputTokens: Schema.Number,
+  outputTokens: Schema.Number,
+  totalTokens: Schema.optional(Schema.Number),
+  cachedReadTokens: Schema.optional(Schema.Number),
+  cacheCreationTokens: Schema.optional(Schema.Number),
+  reasoningTokens: Schema.optional(Schema.Number),
+  modelCalls: Schema.optional(Schema.Number),
+  apiDurationMs: Schema.optional(Schema.Number),
+  costUsdTicks: Schema.optional(Schema.Number),
+  modelUsage: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+});
+
+type XAiTurnUsage = typeof XAiTurnUsage.Type;
+
+const XAiTurnCompletedUpdate = Schema.Struct({
+  sessionId: Schema.String,
+  update: Schema.Struct({
+    sessionUpdate: Schema.Literal("turn_completed"),
+    prompt_id: Schema.optional(Schema.String),
+    usage: XAiTurnUsage,
+  }),
+});
+
 interface PendingXAiPromptCompletion {
   readonly sessionId: string;
   readonly promptId: string;
@@ -205,11 +229,30 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
     const activeSessionIdRef = yield* Ref.make<string | undefined>(undefined);
     const pendingRef = yield* Ref.make<ReadonlyArray<PendingXAiPromptCompletion>>([]);
     const completedPromptIdsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+    const completedUsageRef = yield* Ref.make<ReadonlyMap<string, XAiTurnUsage>>(new Map());
     let nextPromptFallbackId = 0;
     const allocatePromptFallbackId = Effect.sync(() => {
       nextPromptFallbackId += 1;
       return `t3-xai-prompt-${nextPromptFallbackId}`;
     });
+
+    yield* runtime.handleExtNotification(
+      "_x.ai/session/update",
+      XAiTurnCompletedUpdate,
+      (notification) => {
+        const promptId = notification.update.prompt_id;
+        if (!promptId) return Effect.void;
+        return Ref.update(completedUsageRef, (entries) => {
+          const next = new Map(entries);
+          next.set(promptId, notification.update.usage);
+          if (next.size > completedXAiPromptIdLimit) {
+            const oldest = next.keys().next().value;
+            if (typeof oldest === "string") next.delete(oldest);
+          }
+          return next;
+        });
+      },
+    );
 
     yield* runtime.handleExtNotification(
       "_x.ai/session/prompt_complete",
@@ -218,6 +261,7 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
         resolveXAiPromptCompletionFallback({
           pendingRef,
           completedPromptIdsRef,
+          completedUsageRef,
           notification,
         }),
     );
@@ -254,6 +298,11 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
             runtime.prompt(requestPayload),
             Deferred.await(fallback.deferred),
           ).pipe(
+            Effect.flatMap((response) =>
+              Ref.get(completedUsageRef).pipe(
+                Effect.map((entries) => withXAiUsage(response, entries.get(fallback.promptId))),
+              ),
+            ),
             Effect.tap((response) =>
               rememberCompletedXAiPromptId(completedPromptIdsRef, response, fallback.promptId),
             ),
@@ -327,14 +376,16 @@ const abortPendingPromptCompletions = (
 const resolveXAiPromptCompletionFallback = ({
   pendingRef,
   completedPromptIdsRef,
+  completedUsageRef,
   notification,
 }: {
   readonly pendingRef: Ref.Ref<ReadonlyArray<PendingXAiPromptCompletion>>;
   readonly completedPromptIdsRef: Ref.Ref<ReadonlyArray<string>>;
+  readonly completedUsageRef: Ref.Ref<ReadonlyMap<string, XAiTurnUsage>>;
   readonly notification: XAiPromptCompleteNotification;
 }) =>
-  Ref.get(completedPromptIdsRef).pipe(
-    Effect.flatMap((completedPromptIds) => {
+  Effect.all([Ref.get(completedPromptIdsRef), Ref.get(completedUsageRef)]).pipe(
+    Effect.flatMap(([completedPromptIds, completedUsage]) => {
       if (
         notification.promptId !== undefined &&
         completedPromptIds.includes(notification.promptId)
@@ -358,7 +409,13 @@ const resolveXAiPromptCompletionFallback = ({
           return [Effect.void, pending] as const;
         }
         return [
-          Deferred.succeed(entry.deferred, promptResponseFromXAi(notification)).pipe(Effect.asVoid),
+          Deferred.succeed(
+            entry.deferred,
+            promptResponseFromXAi(
+              notification,
+              notification.promptId ? completedUsage.get(notification.promptId) : undefined,
+            ),
+          ).pipe(Effect.asVoid),
           [...pending.slice(0, index), ...pending.slice(index + 1)],
         ] as const;
       }).pipe(Effect.flatten);
@@ -397,6 +454,7 @@ export function promptResponseHasMissingXAiStopReason(
 
 function promptResponseFromXAi(
   notification: XAiPromptCompleteNotification,
+  usage?: XAiTurnUsage,
 ): EffectAcpSchema.PromptResponse {
   const stopReason = normalizeXAiStopReason(notification.stopReason);
   const meta: Record<string, unknown> = {
@@ -412,9 +470,43 @@ function promptResponseFromXAi(
   if (notification.agentResult !== undefined) {
     meta.agentResult = notification.agentResult;
   }
+  return withXAiUsage({ stopReason, _meta: meta }, usage);
+}
+
+function withXAiUsage(
+  response: EffectAcpSchema.PromptResponse,
+  usage?: XAiTurnUsage,
+): EffectAcpSchema.PromptResponse {
+  if (usage === undefined) return response;
+  const meta: Record<string, unknown> = {
+    ...(response._meta && typeof response._meta === "object" ? response._meta : {}),
+  };
+  if (usage !== undefined) {
+    meta.xAiUsage = usage;
+    if (usage.modelUsage !== undefined) meta.modelUsage = usage.modelUsage;
+    if (usage.costUsdTicks !== undefined) meta.totalCostUsd = usage.costUsdTicks / 10_000_000_000;
+  }
   return {
-    stopReason,
+    ...response,
     _meta: meta,
+    ...(usage
+      ? {
+          usage: {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            totalTokens: usage.totalTokens ?? usage.inputTokens + usage.outputTokens,
+            ...(usage.cachedReadTokens !== undefined
+              ? { cachedReadTokens: usage.cachedReadTokens }
+              : {}),
+            ...(usage.cacheCreationTokens !== undefined
+              ? { cachedWriteTokens: usage.cacheCreationTokens }
+              : {}),
+            ...(usage.reasoningTokens !== undefined
+              ? { thoughtTokens: usage.reasoningTokens }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
